@@ -381,13 +381,22 @@ function animate() {
   const arcOn = isArcOn() && !session.finished;
   const m = session.sample(dt, _tip, _fwd, arcOn);
 
-  const cursorT = THREE.MathUtils.clamp(m.t, 0, 1);
-  guide.update(dt, { cursorT, arcOn: m.welding, severity: m.severity });
+  // Where the torch is right now, versus how much joint has actually been
+  // welded. The guide needs both: the ring tracks the first, the blue path is
+  // only consumed by the second.
+  const liveT = THREE.MathUtils.clamp(m.t, 0, 1);
+  guide.update(dt, {
+    cursorT: liveT,
+    progressT: session.maxT,
+    onSeam: m.onSeam,
+    arcOn: m.welding,
+    severity: m.severity,
+  });
 
-  seam.pointAt(cursorT, _contact).addScaledVector(seam.lateral, m.lateral);
+  seam.pointAt(liveT, _contact).addScaledVector(seam.lateral, m.lateral);
   if (m.welding) {
     bead.deposit(dt, {
-      t: cursorT,
+      t: liveT,
       lateral: m.lateral,
       speedRatio: m.speedRatio,
       quality: m.quality,
@@ -420,7 +429,7 @@ function animate() {
   if (readoutTimer > 0.1 && readout) {
     readoutTimer = 0;
     readout.textContent =
-      `진행 ${Math.round(cursorT * 100)}%  ·  ` +
+      `진행 ${Math.round(session.maxT * 100)}%${m.onSeam ? '' : ' (심 이탈)'}  ·  ` +
       `아크길이 ${(m.height * 1000).toFixed(1)}mm  ·  ` +
       `중심편차 ${(m.lateral * 1000).toFixed(1)}mm  ·  ` +
       `속도 ${(m.speed * 1000).toFixed(1)}mm/s  ·  ` +

@@ -118,8 +118,10 @@ const RING_FRAG = /* glsl */ `
   precision mediump float;
   uniform float uTime;
   uniform float uArc;
+  uniform float uEngaged; // 1 = torch is over the seam, 0 = it has wandered off
   uniform float uOpacity;
   uniform vec3 uColor;
+  uniform vec3 uIdleColor;
   varying vec2 vUv;
   void main() {
     float r = length(vUv);
@@ -133,9 +135,16 @@ const RING_FRAG = /* glsl */ `
     float scanBand = smoothstep(0.0, 0.08, scan) * (1.0 - smoothstep(0.08, 0.30, scan));
     float pulse = scanBand * uArc * 0.45;
 
-    float alpha = clamp(ring + core * 0.85 + pulse, 0.0, 1.0) * uOpacity;
+    // Off the seam the marker holds position but empties out, so it reads as a
+    // place to return to rather than as a live contact point.
+    float filled = core * 0.85 * uEngaged;
+    float blink = 0.75 + 0.25 * sin(uTime * 5.0);
+    float dim = mix(0.5 * blink, 1.0, uEngaged);
+
+    float alpha = clamp(ring + filled + pulse, 0.0, 1.0) * uOpacity * dim;
     if (alpha < 0.01) discard;
-    gl_FragColor = vec4(uColor + core * 0.5, alpha);
+    vec3 col = mix(uIdleColor, uColor, uEngaged);
+    gl_FragColor = vec4(col + core * 0.5 * uEngaged, alpha);
   }
 `;
 
@@ -164,8 +173,10 @@ export class LinearGuide {
     this.colorZone = new THREE.Color(options.colorZone ?? 0xffc61a);
     this.colorPath = new THREE.Color(options.colorPath ?? 0x1766ff);
 
-    this.cursorT = 0;
+    this.cursorT = 0; // last contact point seen while actually over the seam
+    this.progressT = 0; // how much of the joint has really been welded
     this.arc = 0;
+    this.engaged = 0; // 1 while the torch is over the seam, 0 when it has wandered off
 
     this.group = new THREE.Group();
     parent.add(this.group);
@@ -225,34 +236,50 @@ export class LinearGuide {
   }
 
   /**
+   * Progress and cursor are deliberately two different things.
+   *
+   * `progressT` is how much of the joint has actually been welded, so the blue
+   * path is only consumed by real work -- waving the torch down the bench a
+   * foot above the plate must not eat it.
+   *
+   * `cursorT` is where the contact point is right now, and it is only taken
+   * while the torch is genuinely over the seam. Off the seam the ring holds
+   * its last good position and goes hollow, which reads as "come back to
+   * here" instead of silently sliding along the axis.
+   *
    * @param {number} dt seconds
-   * @param {{cursorT:number, arcOn:boolean, severity:number}} state
-   *   severity 0..1 drives how hard the zone pushes back (hotter, brighter).
+   * @param {{progressT:number, cursorT:number, onSeam:boolean,
+   *          arcOn:boolean, severity:number}} state
    */
   update(dt, state) {
     this.time += dt;
 
-    const cursorT = THREE.MathUtils.clamp(state.cursorT ?? 0, 0, 1);
-    this.cursorT = cursorT;
+    const progressT = THREE.MathUtils.clamp(state.progressT ?? 0, 0, 1);
+    const onSeam = !!state.onSeam;
+    if (onSeam) this.cursorT = THREE.MathUtils.clamp(state.cursorT ?? 0, 0, 1);
+
+    this.progressT = progressT;
     this.arc = THREE.MathUtils.lerp(this.arc, state.arcOn ? 1 : 0, 1 - Math.exp(-dt * 10));
+    this.engaged = THREE.MathUtils.lerp(this.engaged, onSeam ? 1 : 0, 1 - Math.exp(-dt * 12));
     const severity = THREE.MathUtils.clamp(state.severity ?? 0, 0, 1);
 
     const chev = this.chevrons.material.uniforms;
     chev.uTime.value = this.time;
-    chev.uCursor.value = cursorT;
+    chev.uCursor.value = progressT;
     chev.uGlow.value = THREE.MathUtils.lerp(chev.uGlow.value, 0.9 + severity * 0.8, 0.2);
     chev.uColor.value.lerp(
       severity > 0.5 ? _warn.setHex(0xff7a1a) : _warn.copy(this.colorZone),
       0.12
     );
 
-    this.centerLine.material.uniforms.uCursor.value = cursorT;
+    this.centerLine.material.uniforms.uCursor.value = progressT;
 
-    this.seam.pointAt(cursorT, _p);
+    this.seam.pointAt(this.cursorT, _p);
     this.ring.position.copy(_p).addScaledVector(this.seam.normal, 0.0018);
     const ring = this.ring.material.uniforms;
     ring.uTime.value = this.time;
-    ring.uArc.value = this.arc;
+    ring.uArc.value = this.arc * this.engaged;
+    ring.uEngaged.value = this.engaged;
   }
 
   setVisible(visible) {
@@ -339,8 +366,12 @@ export class LinearGuide {
       uniforms: {
         uTime: { value: 0 },
         uArc: { value: 0 },
+        uEngaged: { value: 0 },
         uOpacity: { value: 1 },
         uColor: { value: this.colorPath.clone() },
+        // Still blue -- it is the same marker, just not engaged. Amber here
+        // would collide with the zone outline and the glowing bead.
+        uIdleColor: { value: new THREE.Color(0x6f9fe0) },
       },
       vertexShader: RING_VERT,
       fragmentShader: RING_FRAG,

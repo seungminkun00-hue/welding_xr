@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import { WeldSeam } from './src/WeldSeam.js';
 import { WeldSession } from './src/WeldSession.js';
 import { WeldBead } from './src/WeldBead.js';
+import { LinearGuide } from './src/LinearGuide.js';
 
 let failures = 0;
 function check(label, ok, detail) {
@@ -151,6 +152,49 @@ const dragged = runPass({
 check('wrong travel angle pushes the dot vertically',
   dragged.last.center.y < -1 && Math.abs(dragged.last.center.x) < 0.01,
   `y=${dragged.last.center.y.toFixed(2)}`);
+
+// -- the blue path is only consumed by real welding ------------------------
+// The marker used to slide along from the travel-axis projection alone, so
+// waving the torch past the joint -- off to one side, or up in the air --
+// quietly ate the remaining path.
+{
+  const guide = new LinearGuide(new THREE.Group(), seam);
+  const dt = 1 / 60;
+  const step = (state) => {
+    for (let i = 0; i < 120; i++) guide.update(dt, state);
+  };
+
+  step({ cursorT: 0.4, progressT: 0.4, onSeam: true, arcOn: true, severity: 0 });
+  check('ring tracks the torch while it is on the seam', near(guide.cursorT, 0.4, 1e-9));
+  check('path is consumed up to the welded progress', near(guide.centerLine.material.uniforms.uCursor.value, 0.4, 1e-9));
+  check('ring reads as engaged on the seam', guide.engaged > 0.99, guide.engaged.toFixed(3));
+
+  step({ cursorT: 0.95, progressT: 0.4, onSeam: false, arcOn: false, severity: 0 });
+  check('ring holds position once the torch leaves the seam', near(guide.cursorT, 0.4, 1e-9), guide.cursorT.toFixed(3));
+  check('wandering off does not consume the path', near(guide.centerLine.material.uniforms.uCursor.value, 0.4, 1e-9));
+  check('chevrons also stay anchored to welded progress', near(guide.chevrons.material.uniforms.uCursor.value, 0.4, 1e-9));
+  check('ring reads as disengaged off the seam', guide.engaged < 0.01, guide.engaged.toFixed(3));
+
+  step({ cursorT: 0.55, progressT: 0.4, onSeam: true, arcOn: false, severity: 0 });
+  check('ring picks the torch back up on return', near(guide.cursorT, 0.55, 1e-9));
+}
+
+// Travelling the whole joint with the trigger released must leave the path
+// untouched -- progress is welding, not movement.
+{
+  const dry = new WeldSession(seam);
+  const dt = 1 / 60;
+  const fwd = forward(15, 0);
+  for (let i = 0; i < 2000; i++) {
+    const tip = seam.start
+      .clone()
+      .addScaledVector(seam.travel, (i / 2000) * SEAM_LENGTH)
+      .addScaledVector(seam.normal, 0.010);
+    dry.sample(dt, tip, fwd, false);
+  }
+  check('a dry run with no arc makes no progress', dry.maxT === 0, String(dry.maxT));
+  check('a dry run never reports finished', dry.finished === false);
+}
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
