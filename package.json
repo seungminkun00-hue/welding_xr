@@ -5,7 +5,8 @@
   "description": "MIG 용접 XR 트레이너 — 평판 맞대기 일자 비드",
   "type": "module",
   "scripts": {
-    "serve": "python -m http.server 8777",
+    "serve": "node serve.mjs --http",
+    "serve:vr": "node serve.mjs",
     "test": "node selftest.mjs"
   },
   "devDependencies": {

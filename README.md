@@ -8,9 +8,11 @@ importmap으로 불러오므로 인터넷 없이도 돌아갑니다 (CDN이 막�
 ## 실행
 
 ```bash
-python -m http.server 8777        # 아무 정적 서버나 가능
-# http://127.0.0.1:8777/  열기 (VR은 Quest 브라우저에서 "Enter VR")
+npm run serve        # http://localhost:8777/  — PC에서 보기, Quest Link도 이걸로
+npm run serve:vr     # https://<내 IP>:8443/   — 퀘스트 무선 접속용
 ```
+
+의존성 없이 `serve.mjs` 하나로 돕니다 (npm install은 테스트용 three만 받습니다).
 
 `?debug=1`을 붙이면 `window.weldDebug`로 `scene / camera / renderer / seam /
 guide / bead / hud / session / desktop`에 접근할 수 있습니다. 헤드셋 없이
@@ -47,17 +49,48 @@ guide / bead / hud / session / desktop`에 접근할 수 있습니다. 헤드셋
 작업대는 플레이어 앞 42cm, 높이 90cm에 놓입니다. 용접 중(아크 ON)에는 작업대를
 못 끕니다 — 끌면 심 좌표가 순간이동해서 말도 안 되는 운봉 속도로 기록됩니다.
 
-### 헤드셋에서 접속하기
+### 퀘스트에 무선으로 띄우기
 
-WebXR은 보안 컨텍스트가 필요해서 `localhost`가 아니면 HTTPS여야 합니다.
-Quest에서 PC에 붙이려면 둘 중 하나:
+WebXR은 보안 컨텍스트에서만 동작합니다. `localhost`는 예외로 인정되지만
+`http://192.168.x.x`는 아니라서, 무선으로 붙으려면 HTTPS가 필요합니다.
+`serve.mjs`가 자체 서명 인증서를 만들어 처리합니다.
 
-- **Quest Link / Air Link + 데스크톱 Chrome** — 그대로 `127.0.0.1:8777` 열고 `Enter VR`
-- **Quest 브라우저에서 직접** — `python -m http.server 8777 --bind 0.0.0.0`로 띄우고
-  PC의 로컬 IP(`ipconfig`)로 접속. 단 `http://192.168.x.x`는 보안 컨텍스트가
-  아니라 WebXR이 막히므로, Quest 브라우저에서
-  `chrome://flags` → *Insecure origins treated as secure* 에 해당 주소를
-  등록하거나 HTTPS로 서빙해야 합니다.
+**1. 방화벽 열기** — PC와 퀘스트가 같은 공유기에 있어도 Windows 방화벽이
+먼저 막습니다. 특히 네트워크가 *공용(Public)* 으로 잡혀 있으면 확실히 막힙니다.
+**관리자 권한** PowerShell에서 한 번만:
+
+```powershell
+New-NetFirewallRule -DisplayName "Welding XR (8443)" -Direction Inbound `
+  -Protocol TCP -LocalPort 8443 -Action Allow -Profile Any -RemoteAddress LocalSubnet
+```
+
+같은 랜 안에서만 열리므로 네트워크 전체를 사설(Private)로 바꾸는 것보다 안전합니다.
+나중에 치울 때는 `Remove-NetFirewallRule -DisplayName "Welding XR (8443)"`.
+
+**2. 서버 켜기**
+
+```bash
+npm run serve:vr
+```
+
+접속할 주소가 출력됩니다 (`https://192.168.x.x:8443/`).
+
+**3. 퀘스트 브라우저에서 그 주소 열기** — 인증서 경고가 뜨면
+**고급(Advanced) → 계속(Proceed)**. 이후로는 보안 컨텍스트로 인정돼
+`ENTER VR` 버튼이 살아납니다.
+
+잘 안 될 때:
+
+- PC가 유선, 퀘스트가 Wi-Fi여도 **같은 공유기·같은 대역**이어야 합니다.
+  게스트 Wi-Fi는 보통 격리돼 있어 안 됩니다.
+- 주소를 `http://`로 치면 안 됩니다. 반드시 `https://`.
+- `ENTER VR`이 안 보이면 주소창 자물쇠가 깨져 있어도 상관없지만, 경고 화면을
+  실제로 통과했는지 확인하세요.
+
+### Quest Link(유선/Air Link)로 보기
+
+헤드셋을 PC에 연결한 상태라면 HTTPS가 필요 없습니다. PC Chrome에서
+`npm run serve` 후 `http://localhost:8777/` 열고 `Enter VR`.
 
 ## 가이드 구성
 
