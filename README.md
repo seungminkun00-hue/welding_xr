@@ -1,7 +1,9 @@
 # MIG 용접 XR 시뮬레이터 — 평판 맞대기 일자 비드
 
 평판 두 장을 맞댄 1G(아래보기) 자세에서 직선 MIG 비드를 놓는 WebXR 트레이너입니다.
-빌드 단계 없이 `index.html`의 importmap으로 three.js r160을 CDN에서 불러옵니다.
+빌드 단계가 없습니다. three.js r160은 `vendor/`에 같이 넣어두고 `index.html`의
+importmap으로 불러오므로 인터넷 없이도 돌아갑니다 (CDN이 막히면 모듈 그래프가
+통째로 죽어서 빈 화면만 남습니다).
 
 ## 실행
 
@@ -79,6 +81,7 @@ HUD만 보고 끝나지 않도록, 실제로 놓인 비드가 결과물로 남�
 | `src/TorchHud.js` | 토치 위 3종 게이지 (캔버스 → 빌보드 쿼드) |
 | `src/WeldBead.js` | 비드 적층 · 용융풀 · 스파크 |
 | `src/WeldSession.js` | 측정·판정·채점 |
+| `vendor/` | three.js r160 + OrbitControls + VRButton (오프라인 실행용) |
 | `legacy/` | 이전 원형 파이프 조인트 가이드 (참고용, 미사용) |
 
 ## 테스트

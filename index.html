@@ -5,11 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>MIG 용접 XR 시뮬레이터 — 일자 비드</title>
   <link rel="stylesheet" href="./style.css" />
+  <!-- three.js is vendored into ./vendor rather than pulled from a CDN: the
+       demo has to run on a workshop PC or a headset with no internet, and a
+       blocked CDN kills the whole module graph with no visible error. -->
   <script type="importmap">
     {
       "imports": {
-        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        "three": "./vendor/three.module.js",
+        "three/addons/": "./vendor/addons/"
       }
     }
   </script>
@@ -37,6 +40,22 @@
     <div id="readout">준비됨</div>
   </div>
   <div id="result"></div>
+  <div id="booterror"></div>
   <script type="module" src="./main.js"></script>
+  <script>
+    // A module that fails to load leaves the overlay sitting on a blank page,
+    // which looks identical to an app that is running but drawing nothing.
+    // Say what went wrong instead of letting it read as a rendering bug.
+    setTimeout(function () {
+      if (document.querySelector('canvas')) return;
+      var el = document.getElementById('booterror');
+      el.innerHTML =
+        '<b>3D 엔진을 불러오지 못했습니다.</b><br>' +
+        'DevTools 콘솔(F12)의 빨간 오류를 확인하세요. 흔한 원인: ' +
+        '<code>vendor/three.module.js</code> 누락, 또는 <code>file://</code>로 연 경우 ' +
+        '(정적 서버로 열어야 합니다).';
+      el.style.display = 'block';
+    }, 3000);
+  </script>
 </body>
 </html>
