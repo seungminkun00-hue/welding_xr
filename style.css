@@ -1,0 +1,42 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: #0b0e14;
+  font-family: -apple-system, "Segoe UI", sans-serif;
+  color: #eaeef2;
+}
+
+canvas {
+  display: block;
+}
+
+#overlay {
+  position: fixed;
+  left: 16px;
+  top: 16px;
+  max-width: 360px;
+  padding: 14px 18px;
+  background: rgba(10, 14, 22, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  font-size: 14px;
+  line-height: 1.5;
+  pointer-events: none;
+  z-index: 10;
+}
+
+#overlay h1 {
+  font-size: 16px;
+  margin: 0 0 6px;
+}
+
+#overlay ul {
+  margin: 8px 0;
+  padding-left: 18px;
+}
+
+#overlay .hint {
+  color: #9fb4c9;
+  margin-bottom: 0;
+}

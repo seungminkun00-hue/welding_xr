@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Welding XR Guide Demo</title>
+  <link rel="stylesheet" href="./style.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="overlay">
+    <h1>용접 가이드 WebXR 데모 — 2분할 운봉</h1>
+    <p>파이프-플레이트 이음매를 6시→12시로 두 번 나눠(좌측→이음매 도킹→우측) 용접하는 가이드입니다.</p>
+    <ul>
+      <li><b>이동:</b> W/A/S/D = 토치를 이음매 평면 위에서 이동</li>
+      <li><b>간격:</b> Q/E = 토치-모재 거리(아크 높이) 조절</li>
+      <li><b>각도:</b> 방향키(←→↑↓) = 토치 기울기(작업각) 조절</li>
+      <li><b>VR:</b> "Enter VR" 입장 후 컨트롤러가 토치. 위치+방향 모두 그대로 반영됩니다</li>
+    </ul>
+    <p class="hint">
+      네온 화살표 물결 = 흐름 방향 · 흰색 선두 화살표 = 명장 페이스메이커 ·
+      초록/주황 = 아크 높이·각도 정확도 · 12시에서 토치를 떼면 다음 구간 전환
+    </p>
+  </div>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
