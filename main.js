@@ -13,6 +13,7 @@ import { WeldSession } from './src/WeldSession.js';
 // starts on. Travel is -Z, so "forward" on the keyboard is forward on the weld.
 // ---------------------------------------------------------------------------
 const BENCH_HEIGHT = 0.9;
+const WORKPIECE_Z = -0.42; // an arm's length in front of where the player stands
 const PLATE_WIDTH = 0.13; // across the seam, per plate
 const PLATE_LENGTH = 0.34; // along the seam
 const PLATE_THICKNESS = 0.012;
@@ -48,10 +49,10 @@ scene.background = new THREE.Color(0x0a0d13);
 const camera = new THREE.PerspectiveCamera(52, window.innerWidth / window.innerHeight, 0.01, 50);
 // Roughly where a welder's eyes sit behind the joint: low enough that the seam
 // runs away from you in perspective rather than reading as a plan view.
-camera.position.set(0.26, 1.27, 0.44);
+camera.position.set(0.26, 1.27, WORKPIECE_Z + 0.44);
 
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(0, BENCH_HEIGHT, -0.04);
+controls.target.set(0, BENCH_HEIGHT, WORKPIECE_Z - 0.04);
 controls.enableDamping = true;
 controls.minDistance = 0.15;
 controls.maxDistance = 2.5;
@@ -74,8 +75,11 @@ scene.add(new THREE.GridHelper(4, 40, 0x232b36, 0x161c24));
 // Workpiece. This group only ever gets a translation, so local direction
 // vectors double as world direction vectors everywhere downstream.
 // ---------------------------------------------------------------------------
+// In VR the origin is where the player is standing, so a bench at z = 0 sits
+// on top of them with half the seam behind their back. Put it an arm's length
+// in front; the free hand can squeeze to move it from there.
 const workpiece = new THREE.Group();
-workpiece.position.set(0, BENCH_HEIGHT, 0);
+workpiece.position.set(0, BENCH_HEIGHT, WORKPIECE_Z);
 scene.add(workpiece);
 
 const plateMaterial = new THREE.MeshStandardMaterial({
@@ -152,15 +156,80 @@ function buildTorchMesh() {
   return group;
 }
 
-const controller = renderer.xr.getController(0);
-const vrTorch = buildTorchMesh();
-controller.add(vrTorch);
-scene.add(controller);
-scene.add(renderer.xr.getController(1));
+// ---------------------------------------------------------------------------
+// VR controllers
+//
+// The torch binds to the hand the welder actually holds it in, reported by the
+// runtime, rather than to a controller index (which is arbitrary and differs
+// between headsets). Add ?hand=left to weld left-handed.
+//
+// The free hand squeezes to drag the bench: a bench fixed at one height and
+// distance only suits one body, and a trainee fighting their own reach is not
+// learning anything about welding.
+// ---------------------------------------------------------------------------
+const WELDING_HAND =
+  new URLSearchParams(location.search).get('hand') === 'left' ? 'left' : 'right';
 
-let triggerHeld = false;
-controller.addEventListener('selectstart', () => (triggerHeld = true));
-controller.addEventListener('selectend', () => (triggerHeld = false));
+const vrTorch = buildTorchMesh();
+const gripMarker = new THREE.Mesh(
+  new THREE.SphereGeometry(0.018, 16, 12),
+  new THREE.MeshStandardMaterial({ color: 0x47515f, metalness: 0.2, roughness: 0.8 })
+);
+
+const controllers = [0, 1].map((i) => {
+  const c = renderer.xr.getController(i);
+  c.userData.trigger = false;
+  c.userData.handedness = null;
+  c.addEventListener('selectstart', () => (c.userData.trigger = true));
+  c.addEventListener('selectend', () => (c.userData.trigger = false));
+  c.addEventListener('squeezestart', () => startBenchDrag(c));
+  c.addEventListener('squeezeend', () => endBenchDrag(c));
+  c.addEventListener('connected', (event) => {
+    c.userData.handedness = event.data?.handedness ?? null;
+    assignHands();
+  });
+  c.addEventListener('disconnected', () => {
+    c.userData.handedness = null;
+    c.userData.trigger = false;
+    endBenchDrag(c);
+  });
+  scene.add(c);
+  return c;
+});
+
+let torchController = controllers[0];
+let gripController = controllers[1];
+
+function assignHands() {
+  torchController =
+    controllers.find((c) => c.userData.handedness === WELDING_HAND) ?? controllers[0];
+  gripController = controllers.find((c) => c !== torchController);
+  torchController.add(vrTorch);
+  gripController.add(gripMarker);
+}
+assignHands();
+
+// Dragging the bench mid-pass would teleport the torch in seam coordinates and
+// register as an impossible travel speed, so the arc has to be off first.
+let benchDrag = null;
+const _grab = new THREE.Vector3();
+
+function startBenchDrag(controller) {
+  if (controller !== gripController || isArcOn()) return;
+  controller.getWorldPosition(_grab);
+  benchDrag = { controller, offset: workpiece.position.clone().sub(_grab) };
+}
+
+function endBenchDrag(controller) {
+  if (benchDrag && benchDrag.controller === controller) benchDrag = null;
+}
+
+function updateBenchDrag() {
+  if (!benchDrag) return;
+  benchDrag.controller.getWorldPosition(_grab);
+  workpiece.position.copy(_grab).add(benchDrag.offset);
+  workpiece.position.y = THREE.MathUtils.clamp(workpiece.position.y, 0.55, 1.35);
+}
 
 // Desktop stand-in, parameterised in seam coordinates so the keyboard maps
 // onto the things a welder actually controls.
@@ -199,6 +268,7 @@ const _fwd = new THREE.Vector3();
 const _tip = new THREE.Vector3();
 const _contact = new THREE.Vector3();
 const _viewer = new THREE.Vector3();
+const _q = new THREE.Quaternion();
 
 /** Nozzle direction for the given push/roll angles, in workpiece-local space. */
 function torchForward(travelAngleDeg, workAngleDeg, target) {
@@ -247,7 +317,7 @@ function updateDesktopTorch(dt) {
 
 function getTorchTipLocal(target) {
   if (renderer.xr.isPresenting) {
-    controller.updateMatrixWorld(true); // sync before renderer.render() would
+    torchController.updateMatrixWorld(true); // sync before renderer.render() would
     vrTorch.userData.tip.getWorldPosition(target);
     return workpiece.worldToLocal(target);
   }
@@ -260,15 +330,14 @@ function getTorchTipLocal(target) {
 
 function getTorchForwardLocal(target) {
   if (renderer.xr.isPresenting) {
-    const q = new THREE.Quaternion();
-    controller.getWorldQuaternion(q);
-    return target.set(0, 0, -1).applyQuaternion(q);
+    torchController.getWorldQuaternion(_q);
+    return target.set(0, 0, -1).applyQuaternion(_q);
   }
   return torchForward(desktop.travelAngle, desktop.workAngle, target);
 }
 
 function isArcOn() {
-  return renderer.xr.isPresenting ? triggerHeld : !!keys['Space'];
+  return renderer.xr.isPresenting ? torchController.userData.trigger : !!keys['Space'];
 }
 
 function resetPass() {
@@ -304,6 +373,7 @@ let wasFinished = false;
 function animate() {
   const dt = Math.min(clock.getDelta(), 0.05);
 
+  updateBenchDrag();
   updateDesktopTorch(dt);
   getTorchTipLocal(_tip);
   getTorchForwardLocal(_fwd);
