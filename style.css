@@ -2,7 +2,7 @@ html, body {
   margin: 0;
   padding: 0;
   overflow: hidden;
-  background: #0b0e14;
+  background: #0a0d13;
   font-family: -apple-system, "Segoe UI", sans-serif;
   color: #eaeef2;
 }
@@ -15,9 +15,9 @@ canvas {
   position: fixed;
   left: 16px;
   top: 16px;
-  max-width: 360px;
+  max-width: 380px;
   padding: 14px 18px;
-  background: rgba(10, 14, 22, 0.72);
+  background: rgba(10, 14, 22, 0.74);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 12px;
   font-size: 14px;
@@ -38,5 +38,53 @@ canvas {
 
 #overlay .hint {
   color: #9fb4c9;
-  margin-bottom: 0;
+  font-size: 13px;
+  margin: 8px 0 0;
+}
+
+#readout {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  color: #cfe0f0;
+}
+
+#result {
+  display: none;
+  position: fixed;
+  right: 16px;
+  top: 16px;
+  min-width: 260px;
+  padding: 16px 20px;
+  background: rgba(10, 14, 22, 0.86);
+  border: 1px solid rgba(79, 215, 255, 0.35);
+  border-radius: 12px;
+  font-size: 14px;
+  pointer-events: none;
+  z-index: 10;
+}
+
+#result h2 {
+  font-size: 18px;
+  margin: 0 0 12px;
+  color: #4fd7ff;
+}
+
+#result .bar {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 4px 0;
+}
+
+#result .bar b {
+  font-variant-numeric: tabular-nums;
+}
+
+#result .hint {
+  color: #9fb4c9;
+  font-size: 12px;
+  margin: 12px 0 0;
 }

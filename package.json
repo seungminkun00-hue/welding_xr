@@ -1,0 +1,14 @@
+{
+  "name": "welding-xr-demo",
+  "version": "0.2.0",
+  "private": true,
+  "description": "MIG 용접 XR 트레이너 — 평판 맞대기 일자 비드",
+  "type": "module",
+  "scripts": {
+    "serve": "python -m http.server 8777",
+    "test": "node selftest.mjs"
+  },
+  "devDependencies": {
+    "three": "0.160.0"
+  }
+}
