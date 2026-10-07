@@ -45,6 +45,7 @@ const MIME = {
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
   '.wasm': 'application/wasm',
+  '.hdr': 'image/vnd.radiance',
 };
 
 /** Every non-loopback IPv4 address this machine answers on. */
@@ -69,12 +70,16 @@ async function ensureCertificate(hosts) {
   }
 
   await fs.mkdir(CERT_DIR, { recursive: true });
+  // Windows OpenSSL installations may not ship a default openssl.cnf.
+  const configFile = path.join(CERT_DIR, 'openssl.cnf');
+  await fs.writeFile(configFile, '[req]\ndistinguished_name = dn\n[dn]\n');
   const san = ['DNS:localhost', 'IP:127.0.0.1', ...hosts.map((h) => `IP:${h}`)].join(',');
   console.log(`[cert] generating self-signed certificate for ${san}`);
   execFileSync(
     'openssl',
     [
       'req', '-x509',
+      '-config', configFile,
       '-newkey', 'rsa:2048',
       '-nodes',
       '-keyout', KEY_FILE,
@@ -89,6 +94,9 @@ async function ensureCertificate(hosts) {
 }
 
 async function handle(req, res) {
+  if (args.includes('--diagnostic')) {
+    console.log(`[request] ${req.socket.remoteAddress} ${req.method} ${req.url}`);
+  }
   const requested = decodeURIComponent(new URL(req.url, 'http://x').pathname);
   const relative = requested === '/' ? 'index.html' : requested.replace(/^\/+/, '');
   const filePath = path.join(ROOT, relative);
@@ -130,6 +138,14 @@ if (useHttp) {
   server = createHttpsServer({ key, cert }, handle);
 }
 
+if (args.includes('--diagnostic')) {
+  server.on('connection', socket => {
+    console.log(`[connection] ${socket.remoteAddress}:${socket.remotePort}`);
+  });
+  server.on('tlsClientError', (error, socket) => {
+    console.log(`[tls-error] ${socket.remoteAddress ?? 'unknown'} ${error.message}`);
+  });
+}
 server.listen(PORT, '0.0.0.0', () => {
   const scheme = useHttp ? 'http' : 'https';
   console.log(`\n  ${scheme}://localhost:${PORT}/    (this PC / Quest Link)`);

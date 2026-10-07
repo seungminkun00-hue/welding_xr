@@ -34,7 +34,7 @@ const BAND_VERT = /* glsl */ `
 // Flowing ">" chevrons filling the padded weld zone. The bright apex sits
 // forward at the centerline and the arms trail outward, so each repeat reads
 // as an arrowhead pointing the way the welder must travel.
-const CHEVRON_FRAG = /* glsl */ `
+export const CHEVRON_FRAG = /* glsl */ `
   precision mediump float;
   uniform float uTime;
   uniform highp float uLength; // highp: must match the vertex shader, which defaults to highp
@@ -68,7 +68,7 @@ const CHEVRON_FRAG = /* glsl */ `
 
 // Dashed outline marking the edge of the allowed weld zone. The padding is
 // deliberate: the finished bead has to sit inside these lines.
-const DASH_FRAG = /* glsl */ `
+export const DASH_FRAG = /* glsl */ `
   precision mediump float;
   uniform highp float uLength; // highp: must match the vertex shader, which defaults to highp
   uniform float uDashLen;  // meters, one on+off cycle
@@ -88,7 +88,7 @@ const DASH_FRAG = /* glsl */ `
 `;
 
 // Solid blue centerline showing the exact path still left to weld.
-const CENTER_FRAG = /* glsl */ `
+export const CENTER_FRAG = /* glsl */ `
   precision mediump float;
   uniform float uCursor;
   uniform float uOpacity;
@@ -105,7 +105,7 @@ const CENTER_FRAG = /* glsl */ `
   }
 `;
 
-const RING_VERT = /* glsl */ `
+export const RING_VERT = /* glsl */ `
   varying vec2 vUv;
   void main() {
     vUv = uv * 2.0 - 1.0;
@@ -114,7 +114,7 @@ const RING_VERT = /* glsl */ `
 `;
 
 // The blue ring riding at the torch/plate contact point.
-const RING_FRAG = /* glsl */ `
+export const RING_FRAG = /* glsl */ `
   precision mediump float;
   uniform float uTime;
   uniform float uArc;

@@ -2,12 +2,12 @@
   "name": "welding-xr-demo",
   "version": "0.2.0",
   "private": true,
-  "description": "MIG 용접 XR 트레이너 — 평판 맞대기 일자 비드",
+  "description": "용접 XR 트레이너 — 평판 맞대기 일자 비드(MIG) / 파이프 전주 필릿 2획(피복아크)",
   "type": "module",
   "scripts": {
     "serve": "node serve.mjs --http",
     "serve:vr": "node serve.mjs",
-    "test": "node selftest.mjs"
+    "test": "node selftest.mjs && node selftest-pipe.mjs && node selftest-visuals.mjs"
   },
   "devDependencies": {
     "three": "0.160.0"

@@ -2,3 +2,7 @@ node_modules/
 .DS_Store
 certs/
 .claude/
+.browser-check/
+
+# dev server logs
+*.log

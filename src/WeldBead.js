@@ -6,6 +6,13 @@ const SIDES = [-1, -0.5, 0, 0.5, 1];
 const COLS = SIDES.length;
 
 const RIPPLE_HZ = 7; // arc pulses per second; ripple spacing = travel speed / this
+
+// These three must match tools/blender/bake_bead_maps.py, which sculpts one
+// tile of bead and bakes it. RIPPLES_PER_TILE is how far the phase has to run
+// to cross the texture once; BEAD_SPAN_RATIO is the bead's share of the strip,
+// the rest being the parent metal the toes wet out onto.
+const RIPPLES_PER_TILE = 8;
+const BEAD_SPAN_RATIO = 4.0 / 6.0;
 const HEAT_TAU = 1.1; // seconds for the glow to fall to 1/e
 
 const BEAD_VERT = /* glsl */ `
@@ -17,62 +24,200 @@ const BEAD_VERT = /* glsl */ `
   attribute float aHeat;
   attribute float aQuality;
   attribute float aPhase;
-  uniform vec3 uLateral;
-  uniform vec3 uNormal;
+  attribute vec3 aLateral;
+  attribute vec3 aNormal;
   uniform float uHalfWidth;
   uniform float uHeight;
+  uniform float uRipplesPerTile;
+  uniform float uSpanRatio;
   varying float vFill;
   varying float vHeat;
   varying float vQuality;
   varying float vPhase;
+  varying float vSide;
+  varying vec2 vBeadUv;
   varying vec3 vNormalW;
+  varying vec3 vLateralW;
+  varying vec3 vTravelW;
+  varying vec3 vPosW;
   void main() {
     vFill = aFill;
     vHeat = aHeat;
     vQuality = aQuality;
     vPhase = aPhase;
+    vSide = aSide;
 
     float crown = cos(aSide * 1.5707963);
+    float wave = 0.5 + 0.5 * cos(aPhase - abs(aSide) * 3.6);
+    float ridge = pow(wave, 0.55);
+    float widthRipple = 0.93 + 0.07 * ridge;
+    float heightRipple = 0.62 + 0.38 * ridge;
+    float lump = 1.0 + (1.0 - aQuality) * 0.18 * sin(aPhase * 3.7 + aSide * 8.0);
+
     vec3 pos = aCenter
-      + uLateral * (aOffset + aSide * uHalfWidth * aWidth)
-      + uNormal * (uHeight * aFill * crown + 0.0004);
+      + aLateral * (aOffset + aSide * uHalfWidth * aWidth * widthRipple)
+      + aNormal * (uHeight * aFill * crown * heightRipple * lump + 0.0004);
 
-    // Analytic normal for the crowned profile: straight up at the centreline,
-    // rolling off toward the toes.
-    vNormalW = normalize(uNormal * (1.0 - abs(aSide) * 0.55) + uLateral * (aSide * 0.85));
+    // The baked tile carries the whole shape, so the shading frame here is the
+    // flat plate the tile was baked against -- not the crowned profile, which
+    // is already in the map and would otherwise be counted twice.
+    vNormalW = aNormal;
+    vLateralW = aLateral;
+    vTravelW = normalize(cross(aNormal, aLateral));
 
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+    // Phase, not distance, drives the texture along travel. That is what keeps
+    // the ripple spacing tied to how fast the trainee is moving: the arc pulses
+    // at a fixed rate, so running faster stretches the dimes out.
+    vBeadUv = vec2(
+      0.5 + aSide * 0.5 * uSpanRatio,
+      aPhase / (6.2831853 * uRipplesPerTile)
+    );
+
+    vec4 world = modelMatrix * vec4(pos, 1.0);
+    vPosW = world.xyz;
+    gl_Position = projectionMatrix * viewMatrix * world;
   }
 `;
 
 const BEAD_FRAG = /* glsl */ `
-  precision mediump float;
+  precision highp float;
   uniform vec3 uLightDir;
   uniform vec3 uGoodColor;
   uniform vec3 uBadColor;
   uniform vec3 uHotColor;
+  uniform sampler2D uBeadNormal;
+  uniform sampler2D uBeadAO;
+  uniform float uHasMaps;
   varying float vFill;
   varying float vHeat;
   varying float vQuality;
   varying float vPhase;
+  varying float vSide;
+  varying vec2 vBeadUv;
   varying vec3 vNormalW;
+  varying vec3 vLateralW;
+  varying vec3 vTravelW;
+  varying vec3 vPosW;
+
+  // Oxide-film interference, the colours a weld cools through.
+  vec3 tempTint(float t) {
+    vec3 straw  = vec3(0.72, 0.56, 0.26);
+    vec3 copper = vec3(0.58, 0.33, 0.21);
+    vec3 violet = vec3(0.34, 0.26, 0.44);
+    vec3 blue   = vec3(0.22, 0.34, 0.52);
+    vec3 c = mix(straw, copper, smoothstep(0.0, 0.35, t));
+    c = mix(c, violet, smoothstep(0.35, 0.68, t));
+    c = mix(c, blue, smoothstep(0.68, 1.0, t));
+    return c;
+  }
+
   void main() {
     if (vFill < 0.02) discard;
 
-    vec3 n = normalize(vNormalW);
+    // Sculpted tile when it has loaded, analytic crescent until then, so a
+    // missing asset degrades to the old look instead of to a black bead.
+    vec3 n;
+    float ao;
+    float ripple;
+    if (uHasMaps > 0.5) {
+      vec3 nt = texture2D(uBeadNormal, vBeadUv).xyz * 2.0 - 1.0;
+      n = normalize(vLateralW * nt.x + vTravelW * nt.y + vNormalW * nt.z);
+      ao = texture2D(uBeadAO, vBeadUv).r;
+      // Reading the ripple back off the baked slope keeps the colour banding
+      // locked to the geometry instead of drifting against it.
+      ripple = clamp(0.5 + nt.y * 1.4, 0.0, 1.0);
+    } else {
+      float wave = 0.5 + 0.5 * cos(vPhase - abs(vSide) * 3.6);
+      ripple = pow(wave, 0.38);
+      float slope = 0.85 * sin(vPhase - abs(vSide) * 3.6);
+      n = normalize(vNormalW * (1.0 - abs(vSide) * 0.55) + vLateralW * (vSide * 0.85) + vTravelW * slope);
+      ao = 0.72 + 0.28 * ripple;
+    }
+
+    vec3 view = normalize(cameraPosition - vPosW);
     float lambert = max(dot(n, normalize(uLightDir)), 0.0);
 
-    // Ripples: laid down at a fixed arc frequency, so travelling faster
-    // stretches them out -- exactly the tell an instructor looks for.
-    float ripple = 0.5 + 0.5 * sin(vPhase);
+    // Stand-in for an environment probe: shop lamps overhead, dark floor below.
+    float sky = n.y * 0.5 + 0.5;
+    vec3 env = mix(vec3(0.09, 0.10, 0.12), vec3(0.58, 0.64, 0.73), sky * sky);
 
     vec3 base = mix(uBadColor, uGoodColor, clamp(vQuality, 0.0, 1.0));
-    base *= 0.76 + 0.24 * ripple;
+    base *= 0.68 + 0.32 * ripple;
+    base = mix(base, base * tempTint(abs(vSide)) * 2.1, 0.14);
 
-    vec3 col = base * (0.28 + 0.72 * lambert);
+    vec3 col = base * (0.42 + 0.70 * lambert) + base * env * 1.55;
+    col *= 0.45 + 0.55 * ao;
+
+    vec3 half0 = normalize(normalize(uLightDir) + view);
+    float spec = pow(max(dot(n, half0), 0.0), 42.0);
+    col += vec3(0.78, 0.81, 0.86) * spec * (0.45 + ripple * 0.55) * ao;
+
     col += uHotColor * pow(clamp(vHeat, 0.0, 1.0), 1.6) * 1.7;
 
     gl_FragColor = vec4(col, 1.0);
+  }
+`;
+
+const HAZ_SIDES = [-1, -0.78, -0.58, -0.4, -0.24, 0, 0.24, 0.4, 0.58, 0.78, 1];
+const HAZ_COLS = HAZ_SIDES.length;
+
+const HAZ_VERT = /* glsl */ `
+  attribute vec3 aCenter;
+  attribute vec3 aLateral;
+  attribute vec3 aNormal;
+  attribute float aSide;
+  attribute float aFill;
+  uniform float uHalfWidth;
+  varying float vSide;
+  varying float vFill;
+  varying float vAlong;
+  void main() {
+    vSide = aSide;
+    vFill = aFill;
+    vAlong = aCenter.x * 91.0 + aCenter.z * 73.0;
+    vec3 pos = aCenter
+      + aLateral * (aSide * uHalfWidth)
+      + aNormal * 0.00018;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+  }
+`;
+
+const HAZ_FRAG = /* glsl */ `
+  precision mediump float;
+  varying float vSide;
+  varying float vFill;
+  varying float vAlong;
+
+  // Same interference ramp as the bead. On the parent metal it is the whole
+  // story: the rainbow band beside the weld is the most recognisable thing
+  // about a finished pipe joint, and without it the plate just looks clean.
+  vec3 tempTint(float t) {
+    vec3 straw  = vec3(0.78, 0.60, 0.27);
+    vec3 copper = vec3(0.62, 0.34, 0.22);
+    vec3 violet = vec3(0.36, 0.27, 0.47);
+    vec3 blue   = vec3(0.23, 0.36, 0.55);
+    vec3 c = mix(straw, copper, smoothstep(0.0, 0.35, t));
+    c = mix(c, violet, smoothstep(0.35, 0.68, t));
+    c = mix(c, blue, smoothstep(0.68, 1.0, t));
+    return c;
+  }
+
+  void main() {
+    if (vFill < 0.05) discard;
+    float d = abs(vSide);
+
+    // The band starts where the bead's own toe ends and dies out as the parent
+    // metal gets far enough away to never have reached tinting temperature.
+    float inner = smoothstep(0.22, 0.34, d);
+    float outer = 1.0 - smoothstep(0.62, 1.0, d);
+    float band = inner * outer;
+    if (band < 0.01) discard;
+
+    // A real tint band wanders; a perfectly parallel one reads as a decal.
+    float wobble = 0.86 + 0.14 * sin(vAlong) * sin(vAlong * 0.37);
+
+    float t = clamp((d - 0.26) / 0.62, 0.0, 1.0);
+    gl_FragColor = vec4(tempTint(t), band * wobble * vFill * 0.82);
   }
 `;
 
@@ -89,20 +234,49 @@ const POOL_FRAG = /* glsl */ `
   uniform float uTime;
   uniform float uArc;
   varying vec2 vUv;
+
+  // Cheap hash so the sputter is irregular rather than a clean sine.
+  float hash(float n) { return fract(sin(n) * 43758.5453); }
+
   void main() {
     float r = length(vUv);
     if (r > 1.0) discard;
-    float flicker = 0.82 + 0.18 * sin(uTime * 47.0) * sin(uTime * 31.0);
-    float core = pow(1.0 - clamp(r, 0.0, 1.0), 2.4);
-    float halo = pow(1.0 - clamp(r, 0.0, 1.0), 0.8) * 0.35;
-    float a = (core + halo) * uArc * flicker;
+    float d = 1.0 - clamp(r, 0.0, 1.0);
+
+    // Arcs are never steady. Two beat frequencies plus a coarse sputter that
+    // occasionally drops the column almost out, the way short-circuit transfer
+    // actually behaves.
+    float beat = 0.80 + 0.20 * sin(uTime * 47.0) * sin(uTime * 31.0);
+    float sputter = mix(0.55, 1.0, hash(floor(uTime * 38.0)));
+    float flicker = beat * mix(1.0, sputter, 0.55);
+
+    // Molten steel, wide and warm.
+    float pool = pow(d, 1.5) * 0.9;
+    vec3 col = vec3(1.25, 0.42, 0.06) * pool;
+
+    // Violet corona: the part that makes a welding photo look like welding.
+    float corona = pow(d, 5.0);
+    col += vec3(0.85, 0.72, 1.70) * corona * 1.5;
+
+    // The plasma column. Deliberately far above 1.0 so tone mapping blows it
+    // out to white with a coloured fringe, which is what the eye expects from
+    // something this much brighter than the room.
+    float core = pow(d, 22.0);
+    col += vec3(5.0, 5.6, 7.4) * core * 2.4;
+
+    float a = clamp((pool * 0.75 + corona * 0.8 + core * 2.0) * uArc * flicker, 0.0, 1.0);
     if (a < 0.01) discard;
-    vec3 col = mix(vec3(1.0, 0.45, 0.08), vec3(1.0, 0.98, 0.9), core);
-    gl_FragColor = vec4(col, a);
+    gl_FragColor = vec4(col * flicker, a);
   }
 `;
 
 const _pt = new THREE.Vector3();
+const _unitZ = new THREE.Vector3(0, 0, 1);
+const _frame = {
+  travel: new THREE.Vector3(),
+  normal: new THREE.Vector3(),
+  lateral: new THREE.Vector3(),
+};
 
 /**
  * The bead the trainee actually lays down.
@@ -117,8 +291,9 @@ export class WeldBead {
     this.parent = parent;
     this.seam = seam;
     this.time = 0;
+    this.visualDetails = options.visualDetails !== false;
 
-    this.segments = options.segments ?? 160;
+    this.segments = options.segments ?? 480;
     this.halfWidth = options.halfWidth ?? 0.0062; // at nominal travel speed
     this.height = options.height ?? 0.0032;
     this.poolLength = options.poolLength ?? 0.007; // meters of molten puddle
@@ -127,6 +302,10 @@ export class WeldBead {
     this.count = count;
 
     const aCenter = new Float32Array(count * 3);
+    // The cross-section frame is per vertex, not per mesh: on a curved seam
+    // every ring of the bead is extruded along a different pair of axes.
+    const aLateral = new Float32Array(count * 3);
+    const aNormal = new Float32Array(count * 3);
     const aSide = new Float32Array(count);
     this.aOffset = new Float32Array(count);
     this.aFill = new Float32Array(count);
@@ -137,12 +316,20 @@ export class WeldBead {
 
     const indices = [];
     for (let i = 0; i <= this.segments; i++) {
-      seam.pointAt(i / this.segments, _pt);
+      const t = i / this.segments;
+      seam.pointAt(t, _pt);
+      const frame = seam.frameAt(t, _frame);
       for (let c = 0; c < COLS; c++) {
         const v = i * COLS + c;
         aCenter[v * 3] = _pt.x;
         aCenter[v * 3 + 1] = _pt.y;
         aCenter[v * 3 + 2] = _pt.z;
+        aLateral[v * 3] = frame.lateral.x;
+        aLateral[v * 3 + 1] = frame.lateral.y;
+        aLateral[v * 3 + 2] = frame.lateral.z;
+        aNormal[v * 3] = frame.normal.x;
+        aNormal[v * 3 + 1] = frame.normal.y;
+        aNormal[v * 3 + 2] = frame.normal.z;
         aSide[v] = SIDES[c];
       }
       if (i < this.segments) {
@@ -159,6 +346,8 @@ export class WeldBead {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(count * 3), 3));
     geometry.setAttribute('aCenter', new THREE.BufferAttribute(aCenter, 3));
+    geometry.setAttribute('aLateral', new THREE.BufferAttribute(aLateral, 3));
+    geometry.setAttribute('aNormal', new THREE.BufferAttribute(aNormal, 3));
     geometry.setAttribute('aSide', new THREE.BufferAttribute(aSide, 1));
     this.offsetAttr = new THREE.BufferAttribute(this.aOffset, 1);
     this.fillAttr = new THREE.BufferAttribute(this.aFill, 1);
@@ -176,14 +365,17 @@ export class WeldBead {
 
     const material = new THREE.ShaderMaterial({
       uniforms: {
-        uLateral: { value: seam.lateral.clone() },
-        uNormal: { value: seam.normal.clone() },
         uHalfWidth: { value: this.halfWidth },
         uHeight: { value: this.height },
         uLightDir: { value: new THREE.Vector3(0.45, 1, 0.5).normalize() },
-        uGoodColor: { value: new THREE.Color(0xc3c9d2) },
-        uBadColor: { value: new THREE.Color(0x4a4036) },
+        uGoodColor: { value: new THREE.Color(0xb6bcc4) },
+        uBadColor: { value: new THREE.Color(0x6e6153) },
         uHotColor: { value: new THREE.Color(0xff6a12) },
+        uRipplesPerTile: { value: RIPPLES_PER_TILE },
+        uSpanRatio: { value: BEAD_SPAN_RATIO },
+        uBeadNormal: { value: null },
+        uBeadAO: { value: null },
+        uHasMaps: { value: 0 },
       },
       vertexShader: BEAD_VERT,
       fragmentShader: BEAD_FRAG,
@@ -193,9 +385,20 @@ export class WeldBead {
     this.mesh = new THREE.Mesh(geometry, material);
     this.mesh.frustumCulled = false;
     parent.add(this.mesh);
+    this._loadBeadMaps(material);
 
     this._buildPool();
+    this._buildHeatTint(options);
     this._buildSparks(options.sparkCount ?? 160);
+    this.spatter = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1, 1),
+      // Spatter has already cooled by the time it is sitting on the plate, so
+      // it stays dull. The glowing part of the story belongs to the sparks.
+      new THREE.MeshStandardMaterial({ color: 0x3a342c, metalness: 0.55, roughness: 0.82 }), 400);
+    this.spatter.count = 0;
+    this.spatter.frustumCulled = false;
+    parent.add(this.spatter);
+    this.spatterDummy = new THREE.Object3D();
+    this.spatterAcc = 0;
 
     this.filledSegments = 0;
     this.anyHeat = false;
@@ -241,9 +444,34 @@ export class WeldBead {
       }
     }
 
+    for (let i = lo; i <= hi; i++) {
+      for (let c = 0; c < HAZ_COLS; c++) {
+        const v = i * HAZ_COLS + c;
+        this.hazFill[v] = THREE.MathUtils.lerp(this.hazFill[v], 1, blend);
+      }
+    }
+    this.hazFillAttr.needsUpdate = true;
+
     this.filledSegments = Math.max(this.filledSegments, hi);
     this.anyHeat = true;
     this._emitSparks(m, dt);
+    this.spatterAcc += this.visualDetails ? dt * (2 + (1 - m.quality) * 22) : 0;
+    while (this.spatterAcc >= 1) {
+      this.spatterAcc--;
+      const frame = this.seam.frameAt(m.t, _frame);
+      this.seam.pointAt(m.t, this.spatterDummy.position)
+        .addScaledVector(frame.lateral, m.lateral + (Math.random() < 0.5 ? -1 : 1) * this.halfWidth * (1.1 + Math.random() * 1.5))
+        .addScaledVector(frame.travel, (Math.random() - 0.5) * 0.012)
+        .addScaledVector(frame.normal, 0.0004);
+      const size = 0.00018 + Math.random() * 0.00042;
+      this.spatterDummy.scale.set(size, size, size);
+      this.spatterDummy.updateMatrix();
+      const index = this.spatterCursor ?? 0;
+      this.spatter.setMatrixAt(index, this.spatterDummy.matrix);
+      this.spatterCursor = (index + 1) % 400;
+      this.spatter.count = Math.min(400, this.spatter.count + 1);
+      this.spatter.instanceMatrix.needsUpdate = true;
+    }
   }
 
   /** @param {{arcOn:boolean, point:THREE.Vector3}} s point is in parent-local space */
@@ -273,11 +501,15 @@ export class WeldBead {
 
     const arc = s.arcOn ? 1 : 0;
     this.poolArc = THREE.MathUtils.lerp(this.poolArc ?? 0, arc, 1 - Math.exp(-dt * 18));
-    this.pool.position.copy(s.point).addScaledVector(this.seam.normal, 0.0022);
+    // On a curved seam the puddle has to be re-aimed every frame: the surface
+    // it lies on rotates underneath it as the welder travels.
+    const poolFrame = this.seam.frameAt(s.t ?? 0, _frame);
+    this.pool.position.copy(s.point).addScaledVector(poolFrame.normal, 0.0022);
+    this.pool.quaternion.setFromUnitVectors(_unitZ, poolFrame.normal);
     this.pool.material.uniforms.uTime.value = this.time;
     this.pool.material.uniforms.uArc.value = this.poolArc;
-    this.light.position.copy(s.point).addScaledVector(this.seam.normal, 0.02);
-    this.light.intensity = this.poolArc * 0.05;
+    this.light.position.copy(s.point).addScaledVector(poolFrame.normal, 0.02);
+    this.light.intensity = this.poolArc * 0.12;
 
     this._updateSparks(dt);
   }
@@ -289,6 +521,8 @@ export class WeldBead {
     this.aHeat.fill(0);
     this.aQuality.fill(0);
     this.aPhase.fill(0);
+    this.hazFill.fill(0);
+    this.hazFillAttr.needsUpdate = true;
     this.offsetAttr.needsUpdate = true;
     this.fillAttr.needsUpdate = true;
     this.widthAttr.needsUpdate = true;
@@ -298,6 +532,11 @@ export class WeldBead {
     this.filledSegments = 0;
     this.anyHeat = false;
     this.sparkLife.fill(0);
+    this.sparkAlpha.fill(0);
+    this.sparks.geometry.attributes.aAlpha.needsUpdate = true;
+    this.spatter.count = 0;
+    this.spatterCursor = 0;
+    this.spatterAcc = 0;
   }
 
   /** Coverage and mean quality over the part of the seam that got welded. */
@@ -318,7 +557,7 @@ export class WeldBead {
   }
 
   dispose() {
-    for (const obj of [this.mesh, this.pool, this.sparks]) {
+    for (const obj of [this.mesh, this.pool, this.sparks, this.spatter, this.heatTint]) {
       obj.geometry.dispose();
       obj.material.dispose();
       this.parent.remove(obj);
@@ -327,6 +566,104 @@ export class WeldBead {
   }
 
   // -- internals -------------------------------------------------------
+
+/**
+   * The rainbow band of oxide the parent metal is left with after the arc has
+   * passed. It is a separate ribbon rather than part of the bead because it
+   * lies on the plate, not on the deposited metal, and has to read through to
+   * the steel texture underneath.
+   */
+  _buildHeatTint(options = {}) {
+    const segments = this.segments;
+    const count = (segments + 1) * HAZ_COLS;
+    const aCenter = new Float32Array(count * 3);
+    const aLateral = new Float32Array(count * 3);
+    const aNormal = new Float32Array(count * 3);
+    const aSide = new Float32Array(count);
+    this.hazFill = new Float32Array(count);
+
+    const indices = [];
+    for (let i = 0; i <= segments; i++) {
+      const t = i / segments;
+      this.seam.pointAt(t, _pt);
+      const frame = this.seam.frameAt(t, _frame);
+      for (let c = 0; c < HAZ_COLS; c++) {
+        const v = i * HAZ_COLS + c;
+        aCenter[v * 3] = _pt.x;
+        aCenter[v * 3 + 1] = _pt.y;
+        aCenter[v * 3 + 2] = _pt.z;
+        aLateral[v * 3] = frame.lateral.x;
+        aLateral[v * 3 + 1] = frame.lateral.y;
+        aLateral[v * 3 + 2] = frame.lateral.z;
+        aNormal[v * 3] = frame.normal.x;
+        aNormal[v * 3 + 1] = frame.normal.y;
+        aNormal[v * 3 + 2] = frame.normal.z;
+        aSide[v] = HAZ_SIDES[c];
+      }
+      if (i < segments) {
+        for (let c = 0; c < HAZ_COLS - 1; c++) {
+          const a = i * HAZ_COLS + c;
+          const b = a + 1;
+          const d = (i + 1) * HAZ_COLS + c;
+          const e = d + 1;
+          indices.push(a, d, b, b, d, e);
+        }
+      }
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(count * 3), 3));
+    geometry.setAttribute('aCenter', new THREE.BufferAttribute(aCenter, 3));
+    geometry.setAttribute('aLateral', new THREE.BufferAttribute(aLateral, 3));
+    geometry.setAttribute('aNormal', new THREE.BufferAttribute(aNormal, 3));
+    geometry.setAttribute('aSide', new THREE.BufferAttribute(aSide, 1));
+    this.hazFillAttr = new THREE.BufferAttribute(this.hazFill, 1);
+    geometry.setAttribute('aFill', this.hazFillAttr);
+    geometry.setIndex(indices);
+
+    const material = new THREE.ShaderMaterial({
+      // Roughly three bead widths each side, which is about how far the tint
+      // reaches on a hand-run pass.
+      uniforms: { uHalfWidth: { value: (options.tintHalfWidth ?? this.halfWidth * 3.4) } },
+      vertexShader: HAZ_VERT,
+      fragmentShader: HAZ_FRAG,
+      transparent: true,
+      // It sits a fifth of a millimetre above the plate, so it must not fight
+      // the plate for the depth buffer or punch a hole in what draws after it.
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+
+    this.heatTint = new THREE.Mesh(geometry, material);
+    this.heatTint.frustumCulled = false;
+    this.heatTint.renderOrder = -1;
+    this.parent.add(this.heatTint);
+  }
+
+  /**
+   * Pull in the sculpted bead tile baked by tools/blender/bake_bead_maps.py.
+   * Both maps have to arrive before either is used, otherwise the first frame
+   * after load shades a sculpted normal against a flat AO.
+   */
+  _loadBeadMaps(material) {
+    // The headless self-tests construct a WeldBead with no real DOM, and
+    // TextureLoader reaches for document. They do not shade anything, so
+    // skipping the fetch there is enough; uHasMaps simply stays 0.
+    if (typeof document === 'undefined' || typeof document.createElementNS !== 'function') return;
+    const loader = new THREE.TextureLoader();
+    let pending = 2;
+    const arrive = (slot) => (texture) => {
+      texture.colorSpace = THREE.NoColorSpace;
+      // Only the travel direction tiles; across the bead the strip is the
+      // whole width and must not wrap onto itself.
+      texture.wrapS = THREE.ClampToEdgeWrapping;
+      texture.wrapT = THREE.RepeatWrapping;
+      material.uniforms[slot].value = texture;
+      if (--pending === 0) material.uniforms.uHasMaps.value = 1;
+    };
+    loader.load('./assets/bead_normal.png', arrive('uBeadNormal'));
+    loader.load('./assets/bead_ao.png', arrive('uBeadAO'));
+  }
 
   _buildPool() {
     const material = new THREE.ShaderMaterial({
@@ -339,15 +676,17 @@ export class WeldBead {
       side: THREE.DoubleSide,
     });
     const mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.02, 0.02), material);
-    mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), this.seam.normal);
+    mesh.quaternion.setFromUnitVectors(_unitZ, this.seam.normal);
     mesh.frustumCulled = false;
     this.parent.add(mesh);
     this.pool = mesh;
     this.poolArc = 0;
 
-    // Kept deliberately tight: the arc should pool light around the puddle,
-    // not floodlight the whole plate.
-    this.light = new THREE.PointLight(0xffa94d, 0, 0.3, 2);
+    // The old colour here, 0xcaffdc, is mint green, and it was most of why
+    // the arc looked wrong: a welding arc runs around 6000 K and throws a cold
+    // blue-white light, never a green one. Reach extended too -- an arc is by
+    // far the brightest thing in the shop and does light the bench around it.
+    this.light = new THREE.PointLight(0xbcd2ff, 0, 0.55, 2);
     this.parent.add(this.light);
   }
 
@@ -356,41 +695,51 @@ export class WeldBead {
     this.sparkPos = new Float32Array(count * 3);
     this.sparkVel = new Float32Array(count * 3);
     this.sparkLife = new Float32Array(count);
+    this.sparkMaxLife = new Float32Array(count);
     this.sparkCursor = 0;
     this.sparkEmitAcc = 0;
 
+    // Two vertices per spark, drawn as a line from the particle back along its
+    // own velocity. Round dots read as confetti; what makes a welding photo
+    // legible is that every spark is a streak pointing the way it flew.
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(this.sparkPos, 3));
-    this.sparkAlpha = new Float32Array(count);
+    this.sparkVerts = new Float32Array(count * 2 * 3);
+    geometry.setAttribute('position', new THREE.BufferAttribute(this.sparkVerts, 3));
+    this.sparkAlpha = new Float32Array(count * 2);
     geometry.setAttribute('aAlpha', new THREE.BufferAttribute(this.sparkAlpha, 1));
+    this.sparkHeat = new Float32Array(count * 2);
+    geometry.setAttribute('aHeat', new THREE.BufferAttribute(this.sparkHeat, 1));
 
     const material = new THREE.ShaderMaterial({
       // uSize is a spark diameter already multiplied by the usual
       // viewportHeight / (2 tan(fov/2)) factor, so point size falls off with
       // distance. The clamp keeps a spark from ballooning when the headset is
       // right on top of the puddle.
-      uniforms: { uSize: { value: 1.4 } },
+      uniforms: {},
       vertexShader: /* glsl */ `
         attribute float aAlpha;
-        uniform float uSize;
+        attribute float aHeat;
         varying float vAlpha;
+        varying float vHeat;
         void main() {
           vAlpha = aAlpha;
-          vec4 mv = modelViewMatrix * vec4(position, 1.0);
-          gl_PointSize = clamp(uSize / max(-mv.z, 0.05), 1.0, 9.0);
-          gl_Position = projectionMatrix * mv;
+          vHeat = aHeat;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         }
       `,
       fragmentShader: /* glsl */ `
         precision mediump float;
         varying float vAlpha;
+        varying float vHeat;
         void main() {
           if (vAlpha <= 0.001) discard;
-          vec2 d = gl_PointCoord - 0.5;
-          float r = length(d);
-          if (r > 0.5) discard;
-          float a = (1.0 - smoothstep(0.1, 0.5, r)) * vAlpha;
-          gl_FragColor = vec4(mix(vec3(1.0, 0.5, 0.1), vec3(1.0, 1.0, 0.85), vAlpha), a);
+          // A spark is a lump of steel cooling in flight, so it runs down the
+          // blackbody ramp: white-hot as it leaves, then yellow, orange, and
+          // finally the dull red that is the last thing visible.
+          vec3 c = mix(vec3(0.70, 0.07, 0.01), vec3(1.30, 0.38, 0.03), smoothstep(0.0, 0.32, vHeat));
+          c = mix(c, vec3(1.60, 0.90, 0.20), smoothstep(0.32, 0.68, vHeat));
+          c = mix(c, vec3(2.20, 2.00, 1.55), smoothstep(0.68, 1.0, vHeat));
+          gl_FragColor = vec4(c, vAlpha);
         }
       `,
       transparent: true,
@@ -398,7 +747,7 @@ export class WeldBead {
       blending: THREE.AdditiveBlending,
     });
 
-    this.sparks = new THREE.Points(geometry, material);
+    this.sparks = new THREE.LineSegments(geometry, material);
     this.sparks.frustumCulled = false;
     this.parent.add(this.sparks);
   }
@@ -411,7 +760,8 @@ export class WeldBead {
     const n = Math.floor(this.sparkEmitAcc);
     this.sparkEmitAcc -= n;
 
-    this.seam.pointAt(m.t, _pt).addScaledVector(this.seam.lateral, m.lateral);
+    const sparkFrame = this.seam.frameAt(m.t, _frame);
+    this.seam.pointAt(m.t, _pt).addScaledVector(sparkFrame.lateral, m.lateral);
     for (let k = 0; k < n; k++) {
       const i = this.sparkCursor;
       this.sparkCursor = (this.sparkCursor + 1) % this.sparkCount;
@@ -419,40 +769,78 @@ export class WeldBead {
       this.sparkPos[i * 3 + 1] = _pt.y;
       this.sparkPos[i * 3 + 2] = _pt.z;
 
-      const speed = 0.25 + Math.random() * 0.75;
+      // Real spatter leaves fast and mostly forward of the arc, with a few
+      // outliers that carry a long way. The cubed roll is what gives that
+      // occasional spark arcing right across the bench.
+      const roll = Math.random();
+      const speed = 0.5 + roll * roll * roll * 3.4;
       const theta = Math.random() * Math.PI * 2;
-      const lift = 0.35 + Math.random() * 0.8;
+      const lift = 0.5 + Math.random() * 1.1;
       const dir = new THREE.Vector3()
-        .addScaledVector(this.seam.lateral, Math.cos(theta))
-        .addScaledVector(this.seam.travel, Math.sin(theta))
-        .addScaledVector(this.seam.normal, lift)
+        .addScaledVector(sparkFrame.lateral, Math.cos(theta))
+        .addScaledVector(sparkFrame.travel, Math.sin(theta))
+        .addScaledVector(sparkFrame.normal, lift)
         .normalize()
         .multiplyScalar(speed);
       this.sparkVel[i * 3] = dir.x;
       this.sparkVel[i * 3 + 1] = dir.y;
       this.sparkVel[i * 3 + 2] = dir.z;
-      this.sparkLife[i] = 0.3 + Math.random() * 0.45;
+      const life = 0.35 + Math.random() * 0.75;
+      this.sparkLife[i] = life;
+      this.sparkMaxLife[i] = life;
     }
   }
 
   _updateSparks(dt) {
     let alive = false;
+    // Millimetre-scale steel loses speed quickly in air, and that drag is why
+    // sparks curve over into a shower instead of flying off in straight lines.
+    const drag = Math.exp(-dt * 2.4);
     for (let i = 0; i < this.sparkCount; i++) {
+      const head = i * 2, tail = i * 2 + 1;
       if (this.sparkLife[i] <= 0) {
-        this.sparkAlpha[i] = 0;
+        this.sparkAlpha[head] = 0;
+        this.sparkAlpha[tail] = 0;
         continue;
       }
       alive = true;
       this.sparkLife[i] -= dt;
-      this.sparkVel[i * 3 + 1] -= 9.81 * 0.45 * dt;
-      this.sparkPos[i * 3] += this.sparkVel[i * 3] * dt;
-      this.sparkPos[i * 3 + 1] += this.sparkVel[i * 3 + 1] * dt;
-      this.sparkPos[i * 3 + 2] += this.sparkVel[i * 3 + 2] * dt;
-      this.sparkAlpha[i] = Math.max(0, Math.min(1, this.sparkLife[i] * 2.2));
+
+      const vx = this.sparkVel[i * 3] * drag;
+      const vy = this.sparkVel[i * 3 + 1] * drag - 9.81 * 0.45 * dt;
+      const vz = this.sparkVel[i * 3 + 2] * drag;
+      this.sparkVel[i * 3] = vx;
+      this.sparkVel[i * 3 + 1] = vy;
+      this.sparkVel[i * 3 + 2] = vz;
+
+      const px = this.sparkPos[i * 3] + vx * dt;
+      const py = this.sparkPos[i * 3 + 1] + vy * dt;
+      const pz = this.sparkPos[i * 3 + 2] + vz * dt;
+      this.sparkPos[i * 3] = px;
+      this.sparkPos[i * 3 + 1] = py;
+      this.sparkPos[i * 3 + 2] = pz;
+
+      // The streak is the distance this spark covered in the last few
+      // milliseconds, so fast ones draw long and slow ones draw short.
+      const STREAK = 0.018;
+      this.sparkVerts[head * 3] = px;
+      this.sparkVerts[head * 3 + 1] = py;
+      this.sparkVerts[head * 3 + 2] = pz;
+      this.sparkVerts[tail * 3] = px - vx * STREAK;
+      this.sparkVerts[tail * 3 + 1] = py - vy * STREAK;
+      this.sparkVerts[tail * 3 + 2] = pz - vz * STREAK;
+
+      const heat = Math.max(0, this.sparkLife[i] / this.sparkMaxLife[i]);
+      const fade = Math.min(1, this.sparkLife[i] * 3.0);
+      this.sparkHeat[head] = heat;
+      this.sparkHeat[tail] = heat * 0.72;
+      this.sparkAlpha[head] = fade;
+      this.sparkAlpha[tail] = fade * 0.2;
     }
     if (alive) {
       this.sparks.geometry.attributes.position.needsUpdate = true;
       this.sparks.geometry.attributes.aAlpha.needsUpdate = true;
+      this.sparks.geometry.attributes.aHeat.needsUpdate = true;
     }
   }
 }

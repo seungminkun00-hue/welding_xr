@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>용접 XR 실습장 — 평판 · 파이프</title>
+  <link rel="stylesheet" href="./style.css" />
+  <!-- three.js is vendored into ./vendor rather than pulled from a CDN: the
+       demo has to run on a workshop PC or a headset with no internet, and a
+       blocked CDN kills the whole module graph with no visible error. -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three.module.js",
+        "three/addons/": "./vendor/addons/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="overlay">
+    <h1>용접 XR 실습장</h1>
+    <p>작업대에 평판 맞대기와 파이프 필릿이 함께 놓여 있습니다.
+      <b>하려는 작업물을 고르면</b> 그 과제로 바뀝니다.</p>
+    <p id="task" class="hint"></p>
+    <p>
+      <b>작업대 밑 서랍</b>에 조작 안내가 적힌 종이가 들어 있습니다.
+      서랍을 열고 종이를 집어 드세요.
+    </p>
+    <p class="hint">
+      VR = 빈 손으로 가리키고 트리거 · 데스크톱 = 클릭.
+      급하면 <b>Space</b>로 아크, <b>W</b>로 진행, <b>1</b>/<b>2</b>로 과제 전환.
+    </p>
+    <div id="readout">준비됨</div>
+  </div>
+  <div id="result"></div>
+  <div id="booterror"></div>
+  <script type="module" src="./shop.js"></script>
+  <script>
+    // A module that fails to load leaves the overlay sitting on a blank page,
+    // which looks identical to an app that is running but drawing nothing.
+    setTimeout(function () {
+      if (document.querySelector('canvas')) return;
+      var el = document.getElementById('booterror');
+      el.innerHTML =
+        '<b>3D 엔진을 불러오지 못했습니다.</b><br>' +
+        'DevTools 콘솔(F12)의 빨간 오류를 확인하세요. 흔한 원인: ' +
+        '<code>vendor/three.module.js</code> 누락, 또는 <code>file://</code>로 연 경우 ' +
+        '(정적 서버로 열어야 합니다).';
+      el.style.display = 'block';
+    }, 3000);
+  </script>
+</body>
+</html>

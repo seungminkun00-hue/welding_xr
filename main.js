@@ -1,3 +1,11 @@
+import { buildWorkshop, perforatedBench, plateFixtures } from './src/Workshop.js';
+import { steelMaterialPBR } from './src/SteelTextures.js';
+import { buildMigTorch } from './src/Torches.js';
+import { PoseStabilizer } from './src/Stability.js';
+import { VRControls } from './src/VRControls.js';
+import './src/boot-status.js';
+import { HelmetView } from './src/HelmetView.js';
+import { PoseGuide } from './src/PoseGuide.js';
 import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -36,14 +44,24 @@ const TILT_LIMIT = 55; // deg
 // Renderer / scene / camera
 // ---------------------------------------------------------------------------
 const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.xr.enabled = true;
+// Update the tracked camera exactly once in our animation loop.
+renderer.xr.cameraAutoUpdate = false;
+renderer.xr.setFramebufferScaleFactor(0.85);
+renderer.xr.setFoveation(1);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
+// Without tone mapping the arc and the lamp highlights clip flat to white,
+// which is most of why the steel read as a video-game surface rather than
+// as metal. ACES keeps the roll-off into the highlights.
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.95;
 document.body.appendChild(renderer.domElement);
 document.body.appendChild(VRButton.createButton(renderer));
 
 const scene = new THREE.Scene();
+const handStability = new PoseStabilizer();
 scene.background = new THREE.Color(0x0a0d13);
 
 const camera = new THREE.PerspectiveCamera(52, window.innerWidth / window.innerHeight, 0.01, 50);
@@ -65,11 +83,11 @@ window.addEventListener('resize', () => {
 });
 
 // Dim ambient on purpose: the arc should be the brightest thing in the room.
-scene.add(new THREE.HemisphereLight(0x9fc0e0, 0x14161c, 0.55));
-const keyLight = new THREE.DirectionalLight(0xffffff, 0.75);
+scene.add(new THREE.HemisphereLight(0x9fc0e0, 0x14161c, 0.18));
+const keyLight = new THREE.DirectionalLight(0xffffff, 0.45);
 keyLight.position.set(0.8, 2, 0.9);
 scene.add(keyLight);
-scene.add(new THREE.GridHelper(4, 40, 0x232b36, 0x161c24));
+buildWorkshop(scene, renderer);
 
 // ---------------------------------------------------------------------------
 // Workpiece. This group only ever gets a translation, so local direction
@@ -82,26 +100,29 @@ const workpiece = new THREE.Group();
 workpiece.position.set(0, BENCH_HEIGHT, WORKPIECE_Z);
 scene.add(workpiece);
 
-const plateMaterial = new THREE.MeshStandardMaterial({
-  color: 0x8e949c,
-  metalness: 0.55,
-  roughness: 0.62,
+// Mill-scale face for everything the welder looks at, and bare cut metal on the
+// two edges that form the root gap: a sheared edge carries no oxide, and that
+// bright line down the middle is most of what sells the joint as real steel.
+const plateFace = steelMaterialPBR('rolledSheet', {
+  span: [PLATE_WIDTH, PLATE_LENGTH], tile: 0.09, renderer, normalScale: 0.35,
+});
+const plateCut = steelMaterialPBR('cutEdge', {
+  span: [PLATE_LENGTH, PLATE_THICKNESS], tile: 0.02, size: 512, renderer, normalScale: 0.7,
 });
 for (const side of [-1, 1]) {
+  // BoxGeometry material order is +x, -x, +y, -y, +z, -z. The face pointing at
+  // the seam is the inboard one, which differs per plate.
+  const faces = Array(6).fill(plateFace);
+  faces[side > 0 ? 1 : 0] = plateCut;
   const plate = new THREE.Mesh(
     new THREE.BoxGeometry(PLATE_WIDTH, PLATE_THICKNESS, PLATE_LENGTH),
-    plateMaterial
+    faces
   );
   plate.position.set(side * (PLATE_WIDTH / 2 + ROOT_GAP / 2), -PLATE_THICKNESS / 2, 0);
   workpiece.add(plate);
 }
 
-const bench = new THREE.Mesh(
-  new THREE.BoxGeometry(0.8, 0.04, 0.6),
-  new THREE.MeshStandardMaterial({ color: 0x2b3038, metalness: 0.2, roughness: 0.85 })
-);
-bench.position.set(0, -PLATE_THICKNESS - 0.02, 0);
-workpiece.add(bench);
+perforatedBench(workpiece, { top: -PLATE_THICKNESS });
 
 const seam = new WeldSeam({
   start: new THREE.Vector3(0, 0, SEAM_LENGTH / 2),
@@ -117,44 +138,18 @@ const seam = new WeldSeam({
 const guide = new LinearGuide(workpiece, seam, { zoneHalfWidth: 0.015 });
 const bead = new WeldBead(workpiece, seam);
 const hud = new TorchHud(scene, { width: 0.15, offset: 0.17 });
-const session = new WeldSession(seam);
+const session = new WeldSession(seam, { standoffTol: 0.006, lateralTol: 0.0075, angleTol: 25, speedRange: 0.008 });
+const visualFeatures = !new URLSearchParams(location.search).has('safe');
+const helmet = visualFeatures ? new HelmetView(scene, renderer, camera, controls, workpiece, new THREE.Vector3(0, 0.36, 0.30)) : null;
+const poseGuide = visualFeatures ? new PoseGuide(workpiece, seam) : null;
+bead.visualDetails = visualFeatures;
 
 // ---------------------------------------------------------------------------
 // Torch
 // ---------------------------------------------------------------------------
-function buildTorchMesh() {
-  const group = new THREE.Group();
-
-  const body = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.014, 0.011, TORCH_LENGTH * 0.72, 20),
-    new THREE.MeshStandardMaterial({ color: 0x1d2026, metalness: 0.35, roughness: 0.55 })
-  );
-  body.rotation.x = -Math.PI / 2;
-  body.position.z = -TORCH_LENGTH * 0.36;
-  group.add(body);
-
-  const nozzle = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.0085, 0.0105, TORCH_LENGTH * 0.26, 20),
-    new THREE.MeshStandardMaterial({ color: 0x5a5f68, metalness: 0.8, roughness: 0.35 })
-  );
-  nozzle.rotation.x = -Math.PI / 2;
-  nozzle.position.z = -TORCH_LENGTH * 0.85;
-  group.add(nozzle);
-
-  const wire = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.0006, 0.0006, TORCH_LENGTH * 0.1, 8),
-    new THREE.MeshStandardMaterial({ color: 0xd8b26a, metalness: 0.9, roughness: 0.3 })
-  );
-  wire.rotation.x = -Math.PI / 2;
-  wire.position.z = -TORCH_LENGTH * 0.95;
-  group.add(wire);
-
-  const tip = new THREE.Object3D();
-  tip.position.z = -TORCH_LENGTH;
-  group.add(tip);
-  group.userData.tip = tip;
-  return group;
-}
+// Geometry lives in src/Torches.js so the plate gun, the pipe holder and the
+// combined shop page cannot drift apart.
+const buildTorchMesh = () => buildMigTorch(TORCH_LENGTH);
 
 // ---------------------------------------------------------------------------
 // VR controllers
@@ -180,7 +175,10 @@ const controllers = [0, 1].map((i) => {
   const c = renderer.xr.getController(i);
   c.userData.trigger = false;
   c.userData.handedness = null;
-  c.addEventListener('selectstart', () => (c.userData.trigger = true));
+  c.addEventListener('selectstart', () => {
+    c.userData.trigger = true;
+    if (c !== torchController) resetPass();
+  });
   c.addEventListener('selectend', () => (c.userData.trigger = false));
   c.addEventListener('squeezestart', () => startBenchDrag(c));
   c.addEventListener('squeezeend', () => endBenchDrag(c));
@@ -227,7 +225,8 @@ function endBenchDrag(controller) {
 function updateBenchDrag() {
   if (!benchDrag) return;
   benchDrag.controller.getWorldPosition(_grab);
-  workpiece.position.copy(_grab).add(benchDrag.offset);
+  if (isArcOn() || !benchDrag.controller.visible) { benchDrag = null; return; }
+  workpiece.position.lerp(_grab.clone().add(benchDrag.offset), 0.2);
   workpiece.position.y = THREE.MathUtils.clamp(workpiece.position.y, 0.55, 1.35);
 }
 
@@ -240,7 +239,9 @@ const desktop = {
   travelAngle: session.idealTravelAngleDeg, // deg of push
   workAngle: 0, // deg of roll
 };
+const vrControls = new VRControls(scene, renderer, workpiece, { weldingHand: WELDING_HAND });
 const desktopTorch = buildTorchMesh();
+poseGuide?.useTorch(desktopTorch);
 workpiece.add(desktopTorch);
 
 const keys = {};
@@ -256,10 +257,14 @@ const readout = document.getElementById('readout');
 const result = document.getElementById('result');
 
 renderer.xr.addEventListener('sessionstart', () => {
+  controls.enabled = false;
+  handStability.reset();
   overlay.style.display = 'none';
   desktopTorch.visible = false;
 });
 renderer.xr.addEventListener('sessionend', () => {
+  controls.enabled = true;
+  handStability.reset();
   overlay.style.display = 'block';
   desktopTorch.visible = true;
 });
@@ -337,10 +342,12 @@ function getTorchForwardLocal(target) {
 }
 
 function isArcOn() {
-  return renderer.xr.isPresenting ? torchController.userData.trigger : !!keys['Space'];
+  return renderer.xr.isPresenting ? torchController.visible && torchController.userData.trigger : !!keys['Space'];
 }
 
 function resetPass() {
+  handStability.reset();
+  poseGuide?.reset();
   session.reset();
   bead.reset();
   desktop.travel = 0;
@@ -370,13 +377,25 @@ const clock = new THREE.Clock();
 let readoutTimer = 0;
 let wasFinished = false;
 
-function animate() {
+function readViewerPosition(xrFrame) {
+  const referenceSpace = renderer.xr.getReferenceSpace();
+  const pose = xrFrame && referenceSpace ? xrFrame.getViewerPose(referenceSpace) : null;
+  if (pose) {
+    const p = pose.transform.position;
+    _viewer.set(p.x, p.y, p.z);
+  } else _viewer.copy(camera.position);
+}
+
+function animate(time, xrFrame) {
   const dt = Math.min(clock.getDelta(), 0.05);
+  if (renderer.xr.isPresenting) renderer.xr.updateCamera(camera);
 
   updateBenchDrag();
   updateDesktopTorch(dt);
   getTorchTipLocal(_tip);
   getTorchForwardLocal(_fwd);
+  if (renderer.xr.isPresenting) handStability.update(dt, _tip, _fwd);
+  else handStability.reset();
 
   const arcOn = isArcOn() && !session.finished;
   const m = session.sample(dt, _tip, _fwd, arcOn);
@@ -405,7 +424,7 @@ function animate() {
   bead.update(dt, { arcOn: m.welding, point: _contact });
 
   if (renderer.xr.isPresenting) {
-    renderer.xr.getCamera().getWorldPosition(_viewer);
+    readViewerPosition(xrFrame);
   } else {
     _viewer.copy(camera.position);
   }
@@ -413,7 +432,7 @@ function animate() {
   hud.update(dt, {
     depth: m.depthErr,
     center: m.center,
-    speed: m.speedFraction,
+    speed: m.welding ? m.speedFraction : 0.5,
     anchor: _tip,
     viewer: _viewer,
   });
@@ -436,8 +455,13 @@ function animate() {
       `작업각 ${m.travelAngleDeg.toFixed(0)}°`;
   }
 
-  controls.update();
+
+  poseGuide?.update(session.maxT, { standoff: session.idealStandoff, travelAngle: session.idealTravelAngleDeg, workAngle: 0 }, 1, 0, null, dt);
+  helmet?.update(m.welding);
+  vrControls.update(_viewer, false);
+  if (!renderer.xr.isPresenting) controls.update();
   renderer.render(scene, camera);
+  window.weldReady = true;
 }
 
 renderer.setAnimationLoop(animate);
@@ -445,5 +469,5 @@ renderer.setAnimationLoop(animate);
 // Opt-in handle for tuning and for driving the scene from the console
 // (index.html?debug=1) -- useful because a headset is not always to hand.
 if (new URLSearchParams(location.search).has('debug')) {
-  window.weldDebug = { scene, camera, renderer, seam, guide, bead, hud, session, desktop };
+  window.weldDebug = { vrControls, helmet, poseGuide, scene, camera, renderer, seam, guide, bead, hud, session, desktop };
 }

@@ -36,6 +36,10 @@ export class TorchHud {
     this.scene = scene;
     this.offset = options.offset ?? 0.13; // meters above the torch tip
     this.redrawTimer = 0;
+    this.smoothing = options.smoothing ?? 0.22;
+    this.targetPosition = new THREE.Vector3();
+    this.facing = new THREE.Object3D();
+    this.anchored = false;
 
     this.state = { depth: 0, center: { x: 0, y: 0 }, speed: 0.5 };
 
@@ -59,7 +63,7 @@ export class TorchHud {
         depthWrite: false,
       })
     );
-    this.mesh.renderOrder = 999;
+    this.mesh.renderOrder = 100001; // After the helmet filter: keep gauge colours.
     this.mesh.frustumCulled = false;
     scene.add(this.mesh);
 
@@ -78,13 +82,21 @@ export class TorchHud {
    * @param {THREE.Vector3} s.viewer world-space head/camera position
    */
   update(dt, s) {
-    this.mesh.position.copy(s.anchor);
-    this.mesh.position.y += this.offset;
-    this.mesh.lookAt(s.viewer);
-
-    this.state.depth = s.depth;
-    this.state.center = s.center;
-    this.state.speed = s.speed;
+    this.targetPosition.copy(s.anchor);
+    this.targetPosition.y += this.offset;
+    if (!this.anchored || this.mesh.position.distanceTo(this.targetPosition) > 0.2) {
+      this.mesh.position.copy(this.targetPosition);
+      this.anchored = true;
+    } else this.mesh.position.lerp(this.targetPosition, 1 - Math.exp(-dt / 0.12));
+    this.facing.position.copy(this.mesh.position);
+    this.facing.lookAt(s.viewer);
+    this.mesh.quaternion.slerp(this.facing.quaternion, 1 - Math.exp(-dt / 0.18));
+    const alpha = 1 - Math.exp(-dt / this.smoothing);
+    const calm = value => Math.abs(value) < 0.12 ? 0 : value;
+    this.state.depth = THREE.MathUtils.lerp(this.state.depth, calm(s.depth), alpha);
+    this.state.center.x = THREE.MathUtils.lerp(this.state.center.x, calm(s.center.x), alpha);
+    this.state.center.y = THREE.MathUtils.lerp(this.state.center.y, calm(s.center.y), alpha);
+    this.state.speed = THREE.MathUtils.lerp(this.state.speed, s.speed, alpha);
 
     this.redrawTimer += dt;
     if (this.redrawTimer >= 1 / REDRAW_HZ) {

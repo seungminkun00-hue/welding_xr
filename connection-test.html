@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="ko">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Quest 연결 확인</title>
+<body style="background:#101820;color:#fff;font:22px sans-serif;padding:24px">
+<h1>서버 연결 성공</h1>
+<p>이 글이 보이면 PC의 용접 서버까지 연결됐습니다.</p>
+<p id="status">VR 지원 확인 중…</p>
+<p><a style="color:#66ffbb" href="pipe.html">파이프 용접 열기</a></p>
+<script>
+const status = document.getElementById('status');
+if (!window.isSecureContext) status.textContent = 'HTTPS 주소로 접속해야 VR이 동작합니다.';
+else if (!navigator.xr) status.textContent = '이 브라우저에서 WebXR을 사용할 수 없습니다.';
+else navigator.xr.isSessionSupported('immersive-vr').then(supported => {
+  status.textContent = supported ? 'VR 사용 가능' : '브라우저가 VR 세션을 지원하지 않습니다.';
+}).catch(error => { status.textContent = 'VR 확인 오류: ' + error.message; });
+</script>
+</body>
+</html>

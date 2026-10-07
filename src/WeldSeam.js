@@ -26,6 +26,36 @@ export class WeldSeam {
     this.lateral = new THREE.Vector3().crossVectors(this.travel, this.normal).normalize();
   }
 
+  /**
+   * The joint frame, which for a straight seam is the same everywhere.
+   *
+   * Present so a straight seam and a SeamCurve are interchangeable: everything
+   * downstream asks for the frame at a t rather than reading fixed axes off
+   * the seam, and a flat plate is just the case where the answer never
+   * changes.
+   */
+  frameAt(_t, target) {
+    const out = target ?? {
+      travel: new THREE.Vector3(),
+      normal: new THREE.Vector3(),
+      lateral: new THREE.Vector3(),
+    };
+    out.travel.copy(this.travel);
+    out.normal.copy(this.normal);
+    out.lateral.copy(this.lateral);
+    return out;
+  }
+
+  /** Signed step in t. No wrapping: a straight seam has no far side. */
+  deltaT(t0, t1) {
+    return t1 - t0;
+  }
+
+  /** Clock position is meaningless on a straight seam. */
+  clockAt() {
+    return 0;
+  }
+
   /** Point at normalized progress t; t outside [0,1] extrapolates past the ends. */
   pointAt(t, target = new THREE.Vector3()) {
     return target.copy(this.start).addScaledVector(this.travel, t * this.length);
