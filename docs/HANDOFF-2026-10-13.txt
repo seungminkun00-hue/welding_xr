@@ -1,0 +1,54 @@
+용접 XR 작업 인계 — 2026-10-13
+
+이 문서는 이전 작업 기록입니다. 2026-10-14 사용자 요청으로 손 추적과 장갑을 제거하고 Meta 양손 컨트롤러로 전환했습니다. 현재 상태는 HANDOFF-2026-10-14.txt와 README를 우선 확인하세요. 아래의 손 추적 요구는 더 이상 유효하지 않으며, 테스트/앱 실행을 사용자가 직접 한다는 제약은 유지됩니다.
+
+프로젝트: C:\Users\sohgs\welding-xr-demo
+중단 요청: 사용자가 오늘 작업을 마치고 저장 요청함. 추가 작업/테스트는 진행하지 않음.
+코드는 작업 폴더에 저장되어 있음. Git 커밋/푸시하지 않은 변경 사항이 있음.
+
+사용자 요구 및 유지할 제약
+- 전광판을 계속 표시. 현재 훈련은 모두 기초연습. 응용연습은 추후 구현.
+- 전광판 우측 하단 설정. 시연은 고스트만 이동하고 실제 용접봉은 정지. 가이드 끄기 지원.
+- 오른손은 물리 컨트롤러로 용접봉 조작, 왼손은 컨트롤러를 내려놓고 실제 손 추적 장갑 표시가 동시에 이루어져야 함.
+- 사용자가 직접 테스트하기로 했으므로 테스트/앱 실행은 하지 말 것. 완료 보고는 리스트로.
+- 기기: Quest 2 자체 Meta 브라우저, 기본 흰색 링형 Touch 컨트롤러.
+- 사용자는 OS와 브라우저 모두 최신이라고 확인했음. 정확한 버전 번호는 받지 않음.
+
+저장된 구현
+- 공통 TrainingUI/StatsBoard 설정, 기초/응용 준비중 표시, 가이드 토글, 독립 MasterDemo.
+- SupportHand: 왼손 25관절 기반 skinned GLB 모델 및 가죽/장갑 커프. 이전 구체/원기둥 손 대체.
+- assets/hands 및 GLTFLoader/BufferGeometryUtils, 출처/라이선스 저장.
+- 전광판 depthTest/depthWrite 및 클릭 가림 처리 변경: 앞쪽 파이프가 보드를 가릴 수 있게 함.
+- PhysicalControllers: 입력 인덱스 대신 handedness로 물리 컨트롤러 연결. 용접봉은 오른손 고정.
+- main.js/pipe.js/shop.js에서 컨트롤러와 왼손 추적을 매 프레임 독립 처리.
+- 전광판 설정에 동시 추적 상태, 왼손 입력 유무, 관절 수신 수/25, 장갑 표시 상태 추가.
+- 위 변경의 실기기 정상 동작은 보장/검증되지 않았음. 테스트는 실행하지 않았음.
+
+해결되지 않은 핵심 문제와 사용자 실기기 관찰
+- 두 컨트롤러를 내려놓으면 왼손 장갑이 나타남.
+- 좌우 중 어느 컨트롤러든 집으면 왼손 추적이 꺼짐.
+- 오른손 컨트롤러 사용 중 전광판에서 '왼손 입력 없음', '0/25'를 사용자가 확인함.
+- 이는 현재 세션의 inputSources에 왼손 hand 입력이 없음을 의미함.
+- 동시 추적은 미해결. 입력 분리/진단 표시 추가를 해결로 보고하지 말 것.
+
+이미 확인한 코드/문서
+- vendor/addons/webxr/VRButton.js는 optionalFeatures에 hand-tracking을 이미 요청함.
+- SupportHand는 left && source.hand를 조회. PhysicalControllers는 손의 가상 gamepad를 물리 컨트롤러로 오인하지 않도록 !source.hand 등을 검사함.
+- Three.js 모델 팩토리는 추적 모드 활성화 스위치가 아님.
+- 표준 WebXR에서 왼쪽만 손 추적으로 강제 전환하고 오른쪽 컨트롤러를 유지하도록 지정하는 API는 확인되지 않음.
+- 손 데이터 없이 장갑을 정지/추정 위치로 띄우는 것은 실제 왼손 추적 요구를 충족하지 못함.
+- Meta SDK v68 릴리스에는 Quest 2 동시 손/컨트롤러 지원 발표가 있음.
+- 현재 Meta native multimodal 문서는 Quest 2 지원 목록과 Pro 컨트롤러 요구 troubleshooting이 함께 있어 조건이 불명확함. Quest 2 전체가 불가능하거나 네이티브 전환으로 반드시 해결된다고 단정하지 말 것.
+- 마지막 안내: 네이티브 OpenXR 동시 추적 API를 사용하는 설치형 앱 경로를 검토할 수 있으나 기기 지원 확인이 선행되어야 함.
+- 사용자에게 네이티브 포팅 작업을 승인받은 적은 없음. 오늘은 저장만 요청함.
+
+참고
+https://www.w3.org/TR/webxr-hand-input-1/
+https://developers.meta.com/vr/documentation/web/webxr-hands/
+https://developers.meta.com/vr/documentation/native/android/native-multimodal/
+https://developers.meta.com/vr/downloads/package/meta-xr-core-sdk/68.0/
+
+다음 재개 시
+- 이 인계와 현재 git diff를 먼저 확인하고 기존 구현을 다시 만들지 말 것.
+- 동일 버전/컨트롤러 질문이나 이미 확인한 입력 없음 진단을 반복하지 말 것.
+- 플랫폼 쪽 해결 경로를 구체적으로 확인하고, 포팅 등 큰 방향 변경은 사용자와 범위 합의 후 진행.

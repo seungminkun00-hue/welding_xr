@@ -6,3 +6,6 @@ certs/
 
 # dev server logs
 *.log
+
+# Blender automatic backups
+*.blend[0-9]*

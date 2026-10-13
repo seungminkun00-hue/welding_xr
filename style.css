@@ -31,6 +31,12 @@ canvas {
   margin: 0 0 6px;
 }
 
+#overlay a, #overlay button, #overlay select, #overlay details {
+  pointer-events: auto;
+}
+
+#overlay a { color: #8dd8ff; }
+
 #overlay ul {
   margin: 8px 0;
   padding-left: 18px;

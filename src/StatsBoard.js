@@ -1,391 +1,262 @@
 import * as THREE from 'three';
 
-const W = 1024;
-const H = 700;
-const REDRAW_HZ = 12;
-const SAMPLE_HZ = 6;
-const HISTORY = 90; // samples kept, ~15 s at 6 Hz
+const W = 1024, H = 700, HISTORY = 90;
+const FONT = "'Malgun Gothic', 'Noto Sans KR', sans-serif";
+const GREEN = '#69efb0', DIM = '#a3b1c4', INK = '#eef5ff';
 
-const BG = '#11141a';
-const FRAME = '#39414f';
-const INK = '#e8eef6';
-const DIM = '#8d97a8';
-const GRID = '#2a313c';
-const BAND = 'rgba(47, 227, 106, 0.13)';
-
-const WHITE = '#f2f6fa';
-const YELLOW = '#ffd21e';
-const ORANGE = '#ff7a3c';
-const GREEN = '#35e36a';
-const RED = '#ff4a4a';
-
-const FONT = "'Malgun Gothic', 'Noto Sans KR', 'Apple SD Gothic Neo', sans-serif";
-const MONO = "'Consolas', 'D2Coding', monospace";
-
-/** Fixed-length ring of numbers, oldest first when read out. */
-class Trace {
-  constructor() {
-    this.values = [];
-  }
-  push(v) {
-    this.values.push(v);
-    if (this.values.length > HISTORY) this.values.shift();
-  }
-  clear() {
-    this.values.length = 0;
-  }
-  get last() {
-    return this.values.length ? this.values[this.values.length - 1] : 0;
-  }
-}
-
-/**
- * The statistics board standing in front of the bench.
- *
- * The floating torch HUD answers "am I inside tolerance right now"; this board
- * answers "what have I been doing for the last fifteen seconds", which is the
- * question a trainee cannot answer from inside the hood. Everything is drawn
- * to one canvas and shown on one quad, so it costs a single draw call and
- * stays readable in the headset where DOM overlays do not exist at all.
- */
 export class StatsBoard {
   constructor(scene, options = {}) {
     this.scene = scene;
-    this.redrawTimer = 0;
-    this.sampleTimer = 0;
-    this.result = null;
-
-    this.traces = {
-      arc: new Trace(),
-      speed: new Trace(),
-      work: new Trace(),
-      travel: new Trace(),
-    };
+    this.occluders = options.occluders ?? [];
     this.live = null;
-
+    this.result = null;
+    this.exercise = 'pipe';
+    this.session = null;
+    this.sampleTimer = this.redrawTimer = 0;
+    this.traces = { arc: [], speed: [], work: [], travel: [] };
+    this.settingsOpen = false;
+    this.buttons = [];
+    this.hovered = null;
+    this.getSettings = () => ({});
+    this.onAction = () => {};
+    this.moveDelta = new THREE.Vector3();
     this.canvas = document.createElement('canvas');
-    this.canvas.width = W;
-    this.canvas.height = H;
+    this.canvas.width = W; this.canvas.height = H;
     this.ctx = this.canvas.getContext('2d');
-
     this.texture = new THREE.CanvasTexture(this.canvas);
     this.texture.colorSpace = THREE.SRGBColorSpace;
     this.texture.minFilter = THREE.LinearFilter;
-
-    const width = options.width ?? 0.66;
-    this.mesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(width, (width * H) / W),
-      new THREE.MeshBasicMaterial({ map: this.texture, transparent: true, depthWrite: false })
-    );
+    this.texture.generateMipmaps = false;
+    const width = options.width ?? 0.86;
+    this.mesh = new THREE.Mesh(new THREE.PlaneGeometry(width, width * H / W),
+      new THREE.MeshBasicMaterial({ map: this.texture, transparent: true, depthTest: true, depthWrite: true, toneMapped: false }));
     this.mesh.position.copy(options.position ?? new THREE.Vector3(0, 1.55, -0.78));
-    // Tipped down towards the welder: at this height a board square to the
-    // floor reads at a glance only if you stand bolt upright.
     this.mesh.rotation.x = options.tilt ?? -0.16;
-    this.mesh.renderOrder = 5;
+    // A physical board behind the work: respect opaque depth even when drawn
+    // after the helmet filter. Never paint this panel over the training pipe.
+    this.mesh.renderOrder = 100003;
     scene.add(this.mesh);
-
-    this.frame = new THREE.Mesh(
-      new THREE.PlaneGeometry(width * 1.03, ((width * H) / W) * 1.045),
-      new THREE.MeshBasicMaterial({ color: 0x424a58 })
-    );
+    this.frame = new THREE.Mesh(new THREE.PlaneGeometry(width * 1.03, width * H / W * 1.045),
+      new THREE.MeshBasicMaterial({ color: 0x424a58, transparent: true, depthTest: true, depthWrite: true, toneMapped: false }));
     this.frame.position.copy(this.mesh.position).add(new THREE.Vector3(0, 0, -0.004));
     this.frame.rotation.copy(this.mesh.rotation);
+    this.frame.renderOrder = 100002;
     scene.add(this.frame);
-
-    this._draw();
+    // Cache only real opaque workpiece meshes, excluding shader-generated
+    // beads/guides. Do not raycast the whole workshop every pointer frame.
+    this.blockers = [];
+    for (const object of this.occluders) object.traverse(o => {
+      if (!o.isMesh) return;
+      const materials = Array.isArray(o.material) ? o.material : [o.material];
+      if (materials.some(m => !m.isShaderMaterial && !m.transparent)) this.blockers.push(o);
+    });
+    // Basic-mode bench repositioning must preserve the board's rear clearance.
+    if (options.follow) {
+      options.follow.attach(this.mesh);
+      options.follow.attach(this.frame);
+    }
+    this.refresh();
   }
-
-  /** Feed one frame of measurements. Only arc-on time is traced. */
+  configure(exercise, session) { this.exercise = exercise; this.session = session; }
   sample(dt, m) {
     this.live = m;
     this.sampleTimer += dt;
-    if (this.sampleTimer < 1 / SAMPLE_HZ) return;
+    if (this.sampleTimer < 1 / 6) return;
     this.sampleTimer = 0;
-    if (!m || !m.welding) return;
-    this.traces.arc.push(m.height * 1000);
-    this.traces.speed.push(m.strokeSpeed * 1000);
-    this.traces.work.push(m.workAngleDeg);
-    this.traces.travel.push(m.travelAngleDeg);
+    if (!m?.welding) return;
+    const values = { arc: m.height * 1000, speed: (m.strokeSpeed ?? m.speed ?? 0) * 1000,
+      work: m.workAngleDeg - (m.target?.workAngle ?? 0),
+      travel: m.travelAngleDeg - (m.target?.travelAngle ?? this.session?.idealTravelAngleDeg ?? 0) };
+    for (const key of Object.keys(this.traces)) {
+      this.traces[key].push(values[key]);
+      if (this.traces[key].length > HISTORY) this.traces[key].shift();
+    }
   }
-
   update(dt) {
     this.redrawTimer += dt;
-    if (this.redrawTimer < 1 / REDRAW_HZ) return;
-    this.redrawTimer = 0;
-    this._draw();
-    this.texture.needsUpdate = true;
+    if (this.redrawTimer >= 1 / 6 || this.hovered !== this.lastHovered) {
+      this.redrawTimer = 0; this.lastHovered = this.hovered; this.refresh();
+    }
   }
-
-  /** The board belongs to whichever exercise reports stroke data; the flat
-   *  butt joint has none, so the combined bench has to be able to hide it. */
-  setVisible(visible) {
-    this.mesh.visible = visible;
-    this.frame.visible = visible;
-  }
-
-  showResult(report) {
-    this.result = report;
-    this._draw();
-    this.texture.needsUpdate = true;
-  }
-
+  refresh() { this._draw(); this.texture.needsUpdate = true; }
+  setVisible(visible) { this.mesh.visible = this.frame.visible = visible; }
+  showResult(report) { this.result = report; this.refresh(); }
   reset() {
-    this.result = null;
-    for (const key of Object.keys(this.traces)) this.traces[key].clear();
-    this._draw();
-    this.texture.needsUpdate = true;
+    this.result = this.live = null;
+    this.sampleTimer = 0;
+    for (const values of Object.values(this.traces)) values.length = 0;
+    this.refresh();
   }
-
-  dispose() {
-    this.scene.remove(this.mesh);
-    this.scene.remove(this.frame);
-    this.mesh.geometry.dispose();
-    this.mesh.material.dispose();
-    this.frame.geometry.dispose();
-    this.frame.material.dispose();
-    this.texture.dispose();
+  moveTo(worldPosition) {
+    // Once deliberately placed, the board stays in the room even if the bench moves.
+    if (this.mesh.parent !== this.scene) {
+      this.scene.attach(this.mesh);
+      this.scene.attach(this.frame);
+    }
+    this.moveDelta.subVectors(worldPosition, this.mesh.position);
+    this.mesh.position.copy(worldPosition);
+    this.frame.position.add(this.moveDelta);
   }
-
-  // -- drawing ---------------------------------------------------------
-
+  hit(raycaster, includeSurface = false) {
+    if (!raycaster || !this.mesh.visible) return null;
+    this.mesh.updateWorldMatrix(true, false);
+    const hit = raycaster.intersectObject(this.mesh)[0];
+    if (!hit?.uv) return null;
+    const x = hit.uv.x * W, y = (1 - hit.uv.y) * H;
+    const button = this.buttons.find(b => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h);
+    // Graphs are not controls: aiming the torch through a chart must not
+    // consume its trigger. Only settings controls capture the ray.
+    const action = button?.enabled ? button.id : null;
+    if (!action && !this.settingsOpen && !includeSurface) return null;
+    for (const object of this.blockers) {
+      let visible = true;
+      for (let node = object; node; node = node.parent) if (!node.visible) { visible = false; break; }
+      if (!visible) continue;
+      object.updateWorldMatrix(true, false);
+      if (raycaster.intersectObject(object, false).some(front => front.distance < hit.distance - 0.001)) return null;
+    }
+    return { action, distance: hit.distance };
+  }
+  activate(action) {
+    if (action === 'settings') this.settingsOpen = !this.settingsOpen;
+    else if (action) this.onAction(action);
+    this.refresh();
+  }
+  _text(text, x, y, size = 24, color = INK) {
+    this.ctx.font = size + 'px ' + FONT;
+    this.ctx.textAlign = 'left';
+    this.ctx.fillStyle = color;
+    this.ctx.fillText(text, x, y);
+  }
+  _button(id, text, x, y, w, h, enabled = true, selected = false) {
+    const ctx = this.ctx;
+    this.buttons.push({ id, x, y, w, h, enabled });
+    ctx.fillStyle = !enabled ? '#19212c' : this.hovered === id ? '#365d73' : selected ? '#214d43' : '#273545';
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = selected ? GREEN : '#42546a';
+    ctx.lineWidth = 2; ctx.strokeRect(x, y, w, h);
+    this._text(text, x + 18, y + h / 2 + 9, 26, enabled ? INK : '#738197');
+  }
   _draw() {
-    const c = this.ctx;
-    c.fillStyle = BG;
-    c.fillRect(0, 0, W, H);
-    c.strokeStyle = FRAME;
-    c.lineWidth = 4;
-    c.strokeRect(2, 2, W - 4, H - 4);
-
-    if (this.result) return this._drawResult();
-
-    const m = this.live;
-    const target = m?.target ?? null;
-
-    // -- header ---------------------------------------------------------
-    c.fillStyle = INK;
-    c.font = `600 38px ${FONT}`;
-    c.textAlign = 'center';
-    c.fillText('용접 통계', W / 2, 52);
-
-    c.font = `22px ${FONT}`;
-    c.fillStyle = DIM;
-    c.textAlign = 'left';
-    const label = m?.stroke?.label ?? '완료';
-    const hour = m ? Math.round(m.clock) % 12 : 12;
-    const posture = m ? this._posture(m.clock) : '';
-    c.fillText(`${label}   ·   ${hour === 0 ? 12 : hour}시 방향 (${posture})`, 34, 92);
-
-    c.textAlign = 'right';
-    const prog = m ? Math.round(THREE.MathUtils.clamp(m.p, 0, 1) * 100) : 0;
-    c.fillStyle = m?.welding ? GREEN : DIM;
-    c.fillText(`진행 ${prog}%${m?.welding ? '  ● 아크' : ''}`, W - 34, 92);
-
-    // -- charts ---------------------------------------------------------
-    this._chart({
-      y: 112,
-      h: 160,
-      title: '아크 길이',
-      unit: 'mm',
-      value: m ? m.height * 1000 : 0,
-      target: target ? target.standoff * 1000 : null,
-      tol: 1.6,
-      min: 0,
-      max: 8,
-      series: [{ trace: this.traces.arc, color: WHITE }],
-    });
-
-    this._chart({
-      y: 292,
-      h: 160,
-      title: '운봉 속도',
-      unit: 'mm/s',
-      value: m ? m.strokeSpeed * 1000 : 0,
-      target: target ? target.speed * 1000 : null,
-      tol: 1.2,
-      min: 0,
-      max: 8,
-      series: [{ trace: this.traces.speed, color: YELLOW }],
-    });
-
-    this._chart({
-      y: 472,
-      h: 160,
-      title: '각도',
-      unit: '°',
-      min: -45,
-      max: 45,
-      target: 0,
-      tol: 15,
-      legend: [
-        { text: `작업각(45° 기준) ${m ? m.workAngleDeg.toFixed(0) : 0}°`, color: ORANGE },
-        { text: `전진각 ${m ? m.travelAngleDeg.toFixed(0) : 0}°`, color: GREEN },
-      ],
-      series: [
-        { trace: this.traces.work, color: ORANGE },
-        { trace: this.traces.travel, color: GREEN },
-      ],
-    });
-
-    // -- footer ---------------------------------------------------------
-    c.fillStyle = DIM;
-    c.font = `20px ${FONT}`;
-    c.textAlign = 'left';
-    c.fillText('트리거 = 아크   ·   반대쪽 손 트리거 = 다시하기   ·   반대쪽 손 그립 = 작업물 옮기기', 34, H - 22);
-  }
-
-  _posture(clock) {
-    if (clock > 10.5 || clock < 1.5) return '아래보기';
-    if (clock > 4.5 && clock < 7.5) return '위보기';
-    return '수직';
-  }
-
-  /** One labelled chart block with a target band and a live value. */
-  _chart({ y, h, title, unit, value, target, tol, min, max, series, legend }) {
-    const c = this.ctx;
-    const x0 = 112;
-    const x1 = W - 40;
-    const top = y + 34;
-    const bottom = y + h;
-    const toY = (v) => bottom - ((THREE.MathUtils.clamp(v, min, max) - min) / (max - min)) * (bottom - top);
-
-    // title and live reading
-    c.textAlign = 'left';
-    c.font = `22px ${FONT}`;
-    if (legend) {
-      let lx = x0;
-      for (const item of legend) {
-        c.fillStyle = item.color;
-        c.beginPath();
-        c.arc(lx + 7, y + 18, 7, 0, Math.PI * 2);
-        c.fill();
-        c.fillStyle = INK;
-        c.fillText(item.text, lx + 22, y + 26);
-        lx += c.measureText(item.text).width + 56;
+    const ctx = this.ctx, settings = this.getSettings();
+    this.buttons = [];
+    ctx.fillStyle = '#101822'; ctx.fillRect(0, 0, W, H);
+    const applied = settings.mode === 'applied';
+    this._button('basic', '기초연습', 28, 20, 190, 52, true, !applied);
+    this._button('applied', '응용연습 · 현장', 234, 20, 280, 52, true, applied);
+    this._text(applied ? settings.jointLabel ?? '작은 배관 접합' : this.exercise === 'pipe' ? '파이프 원주 필릿' : '평판 맞대기', 540, 55, 27);
+    if (this.settingsOpen) this._settings(settings);
+    else if (settings.demo) {
+      this._text('명장 시연 · 고스트만 재생 중', 58, 168, 36, GREEN);
+      this._text('실제 운봉과 연습 기록은 멈춰 있습니다.', 58, 235, 28);
+      this._text('설정 또는 G / 왼손 Y로 시연을 종료하세요.', 58, 292, 26, DIM);
+    } else if (this.result) this._result();
+    else this._live();
+    this._text(settings.inputStatus ?? '', 28, 651, 19, DIM);
+    this._text('왼쪽 트리거: 잡고 이동 / 버튼은 짧게 클릭', 28, 680, 20, DIM);
+    this._button('settings', this.settingsOpen ? '닫기' : '설정', 868, 628, 128, 56, true, this.settingsOpen);
+    // A drawn gear avoids relying on a particular font having a gear glyph.
+    if (!this.settingsOpen) {
+      ctx.save(); ctx.translate(850, 656); ctx.strokeStyle = INK; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(0, 0, 9, 0, Math.PI * 2); ctx.stroke();
+      for (let i = 0; i < 8; i++) {
+        ctx.rotate(Math.PI / 4); ctx.beginPath(); ctx.moveTo(0, 10); ctx.lineTo(0, 15); ctx.stroke();
       }
+      ctx.restore();
+      this.buttons[this.buttons.length - 1].x = 824;
+      this.buttons[this.buttons.length - 1].w = 172;
+    }
+  }
+  _settings(s) {
+    this._text('훈련 설정', 42, 118, 32, GREEN);
+    this._button('guide', '가이드라인  ' + (s.guides ? '켜짐' : '꺼짐'), 42, 145, 450, 62, true, s.guides);
+    this._button('demo', s.demo ? '명장 시연 종료' : '명장 시연 · 고스트', 520, 145, 460, 62, s.supportsDemo, s.demo);
+    this._text('입력: Meta 양손 컨트롤러', 60, 262, 26, DIM);
+    this._button('helmet', '용접 마스크  ' + (s.helmet ? '켜짐' : '꺼짐'), 520, 223, 460, 62, s.hasHelmet, s.helmet);
+    this._button('help', '조작 안내  ' + (s.help ? '켜짐' : '꺼짐'), 42, 301, 450, 62, true, s.help);
+    this._button('reset', '현재 연습 다시 시작', 520, 301, 460, 62);
+    if (!s.supportsDemo) this._text('명장 시연은 파이프 연습에서 제공됩니다.', 42, 455, 21, DIM);
+    if (s.selectStation) {
+      this._button('plate', '평판 연습', 42, 379, 450, 62, true, this.exercise === 'plate');
+      this._button('pipe', '파이프 연습', 520, 379, 460, 62, true, this.exercise === 'pipe');
+    }
+    if (s.mode === 'applied') {
+      this._button('positioner-home', '포지셔너 원위치', 42, 379, 450, 62);
+      this._button('next-joint', '다음 용접부 선택', 520, 379, 460, 62, s.hasNextJoint);
+      this._text(s.positioner ?? '', 42, 459, 21, '#ffd773');
     } else {
-      c.fillStyle = DIM;
-      c.fillText(title, x0, y + 26);
-      c.font = `600 26px ${MONO}`;
-      const off = target !== null && tol ? Math.abs(value - target) / tol : 0;
-      c.fillStyle = off <= 0.5 ? GREEN : off <= 1 ? YELLOW : RED;
-      c.fillText(`${value.toFixed(1)} ${unit}`, x0 + 120, y + 27);
-      if (target !== null) {
-        c.fillStyle = DIM;
-        c.font = `20px ${MONO}`;
-        c.fillText(`목표 ${target.toFixed(1)}`, x0 + 280, y + 27);
-      }
+      this._text('모드를 이동하면 VR에 다시 입장하세요.', 520, 455, 21, DIM);
     }
-
-    // target band: the thing the line has to stay inside
-    if (target !== null && tol) {
-      c.fillStyle = BAND;
-      const yTop = toY(target + tol);
-      const yBot = toY(target - tol);
-      c.fillRect(x0, yTop, x1 - x0, yBot - yTop);
-      c.strokeStyle = 'rgba(53, 227, 106, 0.45)';
-      c.lineWidth = 1.5;
-      c.beginPath();
-      c.moveTo(x0, toY(target));
-      c.lineTo(x1, toY(target));
-      c.stroke();
-    }
-
-    // axes
-    c.strokeStyle = GRID;
-    c.lineWidth = 2;
-    c.beginPath();
-    c.moveTo(x0, top);
-    c.lineTo(x0, bottom);
-    c.lineTo(x1, bottom);
-    c.stroke();
-
-    c.fillStyle = DIM;
-    c.font = `17px ${MONO}`;
-    c.textAlign = 'right';
-    for (let i = 0; i <= 3; i++) {
-      const v = min + ((max - min) * i) / 3;
-      c.fillText(v.toFixed(0), x0 - 10, toY(v) + 6);
-    }
-
-    // traces, oldest at the left edge so the line grows towards "now"
-    for (const s of series) {
-      const vals = s.trace.values;
-      if (vals.length < 2) continue;
-      c.strokeStyle = s.color;
-      c.lineWidth = 3;
-      c.beginPath();
-      for (let i = 0; i < vals.length; i++) {
-        const px = x0 + ((x1 - x0) * i) / (HISTORY - 1);
-        const py = toY(vals[i]);
-        if (i === 0) c.moveTo(px, py);
-        else c.lineTo(px, py);
-      }
-      c.stroke();
-
-      const px = x0 + ((x1 - x0) * (vals.length - 1)) / (HISTORY - 1);
-      c.fillStyle = s.color;
-      c.beginPath();
-      c.arc(px, toY(vals[vals.length - 1]), 5, 0, Math.PI * 2);
-      c.fill();
+    this._text('오른손: 용접 · 왼손: 메뉴 / 그립으로 작업물 조절', 42, 487, 24, DIM);
+    const input = s.inputState;
+    if (input) {
+      this._text(input.summary, 42, 523, 23, input.rightTracked && input.leftTracked ? GREEN : '#ffd773');
+      const right = input.rightTracked ? '위치 수신' : input.rightSource ? '위치 없음' : '입력 없음';
+      const left = input.leftTracked ? '위치 수신' : input.leftSource ? '추적 대기' : '연결 대기';
+      this._text('오른손 컨트롤러: ' + right + ' / 왼손 컨트롤러: ' + left,
+        42, 557, 22, DIM);
+      this._text(s.mode === 'applied' ? '왼손 그립: 잡고 회전 / 왼쪽 스틱 위·아래: 작업대 높이'
+        : '작업물은 왼손 그립을 확실히 누른 동안만 움직입니다.', 42, 591, 22, DIM);
     }
   }
-
-  _drawResult() {
-    const c = this.ctx;
-    const r = this.result;
-
-    c.textAlign = 'center';
-    c.fillStyle = INK;
-    c.font = `600 40px ${FONT}`;
-    c.fillText('용접 결과', W / 2, 60);
-
-    c.font = `600 92px ${MONO}`;
-    c.fillStyle = r.total >= 80 ? GREEN : r.total >= 55 ? YELLOW : RED;
-    c.fillText(`${r.total}점`, W / 2, 152);
-
-    const rows = [
-      ['아크 길이', r.arc],
-      ['중앙 정렬', r.center],
-      ['운봉 속도', r.speed],
-      ['작업각 (45°)', r.work],
-      ['이음부 겹침', r.tieIn],
-      ['진행 방향', r.direction],
-      ['비드 적층률', r.coverage],
-    ];
-
-    const x0 = 120;
-    const barX = 330;
-    const barW = W - barX - 150;
-    let y = 210;
-    c.font = `24px ${FONT}`;
-    for (const [name, pct] of rows) {
-      c.textAlign = 'left';
-      c.fillStyle = DIM;
-      c.fillText(name, x0, y + 8);
-
-      c.fillStyle = '#20262f';
-      c.fillRect(barX, y - 14, barW, 22);
-      c.fillStyle = pct >= 80 ? GREEN : pct >= 55 ? YELLOW : RED;
-      c.fillRect(barX, y - 14, (barW * THREE.MathUtils.clamp(pct, 0, 100)) / 100, 22);
-
-      c.textAlign = 'right';
-      c.fillStyle = INK;
-      c.font = `22px ${MONO}`;
-      c.fillText(`${pct}%`, W - 40, y + 8);
-      c.font = `24px ${FONT}`;
-      y += 46;
+  _live() {
+    const m = this.live, pipe = this.exercise === 'pipe';
+    const progress = pipe ? this.session?.stats?.maxP ?? 0 : this.session?.maxT ?? 0;
+    this._text((m?.welding ? '용접 중' : '연습 대기') + '  ·  진행 ' + Math.round(progress * 100) + '%',
+      36, 114, 25, m?.welding ? GREEN : DIM);
+    const target = m?.target ?? { standoff: this.session?.idealStandoff, speed: this.session?.idealSpeed };
+    this._chart(144, '아크 길이', (m?.height ?? 0) * 1000, target.standoff * 1000,
+      (this.session?.standoffTol ?? 0.0024) * 1000, pipe ? 8 : 24, [{ key: 'arc', color: INK }], 'mm');
+    this._chart(302, '운봉 속도', (m?.strokeSpeed ?? m?.speed ?? 0) * 1000, target.speed * 1000,
+      (this.session?.speedTol ?? this.session?.speedRange ?? 0.0018) * 1000,
+      pipe ? 8 : 24, [{ key: 'speed', color: '#ffd773' }], 'mm/s');
+    this._chart(460, '각도 오차 · 주황 작업각 / 초록 전진각', m?.workAngleDeg ?? 0, 0,
+      this.session?.angleTol ?? 22, 55,
+      [{ key: 'work', color: '#ffae78' }, { key: 'travel', color: GREEN }], '°', -55);
+  }
+  _chart(y, title, value, target, tolerance, max, lines, unit, min = 0) {
+    const ctx = this.ctx, x = 90, width = 890, top = y + 36, height = 105;
+    this._text(title, 36, y + 20, 22, DIM);
+    this._text(value.toFixed(1) + ' ' + unit, 720, y + 20, 25);
+    const toY = v => top + height * (1 - THREE.MathUtils.clamp((v - min) / (max - min), 0, 1));
+    if (Number.isFinite(target)) {
+      ctx.fillStyle = '#1d3b34';
+      ctx.fillRect(x, toY(target + tolerance), width, toY(target - tolerance) - toY(target + tolerance));
+      ctx.strokeStyle = GREEN; ctx.beginPath();
+      ctx.moveTo(x, toY(target)); ctx.lineTo(x + width, toY(target)); ctx.stroke();
     }
-
-    c.textAlign = 'center';
-    c.fillStyle = DIM;
-    c.font = `22px ${FONT}`;
-    c.fillText(
-      `획별 완주 ${r.strokes.map((s) => `${s.id} ${s.coverage}%`).join('  ·  ')}   ·   아크 시간 ${r.arcTime.toFixed(1)}초`,
-      W / 2,
-      y + 14
-    );
-    c.fillStyle = YELLOW;
-    c.font = `600 24px ${FONT}`;
-    c.fillText('반대쪽 손 트리거 = 다시하기   (데스크톱은 R)', W / 2, H - 26);
+    ctx.strokeStyle = '#42546a'; ctx.strokeRect(x, top, width, height);
+    this._text(String(max), 32, top + 16, 18, DIM);
+    this._text(String(min), 32, top + height, 18, DIM);
+    for (const line of lines) {
+      ctx.strokeStyle = line.color; ctx.lineWidth = 3; ctx.beginPath();
+      this.traces[line.key].forEach((v, i) => {
+        const px = x + i / (HISTORY - 1) * width, py = toY(v);
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      });
+      ctx.stroke();
+    }
+  }
+  _result() {
+    const r = this.result;
+    this._text('연습 결과   ' + r.total + '점', 42, 140, 42, GREEN);
+    const rows = [['아크 길이', r.arc ?? r.depth], ['중앙 정렬', r.center], ['운봉 속도', r.speed],
+      ['작업각', r.work], ['이음부 겹침', r.tieIn], ['진행 방향', r.direction], ['비드 적층률', r.coverage]]
+      .filter(([, value]) => Number.isFinite(value));
+    rows.forEach(([label, value], i) => {
+      const y = 190 + i * 54;
+      this._text(label, 48, y + 22, 25, DIM);
+      this.ctx.fillStyle = '#273545'; this.ctx.fillRect(290, y, 540, 26);
+      this.ctx.fillStyle = value >= 80 ? GREEN : '#ffd773';
+      this.ctx.fillRect(290, y, 540 * THREE.MathUtils.clamp(value, 0, 100) / 100, 26);
+      this._text(value + '%', 862, y + 24, 25);
+    });
+    this._text('아크 시간 ' + (r.arcTime ?? 0).toFixed(1) + '초 · 설정에서 다시 시작', 48, 602, 23, DIM);
+  }
+  dispose() {
+    for (const mesh of [this.mesh, this.frame]) {
+      mesh.removeFromParent(); mesh.geometry.dispose(); mesh.material.dispose();
+    }
+    this.texture.dispose();
   }
 }

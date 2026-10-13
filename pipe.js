@@ -1,6 +1,9 @@
 import { buildWorkshop, steelMaterial, perforatedBench, plateFixtures } from './src/Workshop.js';
-import { PoseStabilizer } from './src/Stability.js';
+import { WorkpieceGrab } from './src/Stability.js';
 import { VRControls } from './src/VRControls.js';
+import { TrainingUI } from './src/TrainingUI.js';
+import { PhysicalControllers } from './src/PhysicalControllers.js';
+import { MasterDemo } from './src/MasterDemo.js';
 import './src/boot-status.js';
 import { HelmetView } from './src/HelmetView.js';
 import { PoseGuide } from './src/PoseGuide.js';
@@ -12,9 +15,14 @@ import { pipeFilletPlan } from './src/PassPlan.js';
 import { buildStickHolder, poseTorchByTip } from './src/Torches.js';
 import { CurvedGuide } from './src/CurvedGuide.js';
 import { JointSession } from './src/JointSession.js';
-import { WeldBead } from './src/WeldBead.js';
+import { WeldBead, weldBeadOptions } from './src/WeldBead.js';
 import { TorchHud } from './src/TorchHud.js';
 import { StatsBoard } from './src/StatsBoard.js';
+import { buildFieldWorkshop } from './src/FieldWorkshop.js';
+import { fieldJointDefinitions, createFieldSeam, smallJointPlan } from './src/FieldJoints.js';
+import { Positioner } from './src/Positioner.js';
+
+const APPLIED = document.body.dataset.mode === 'applied';
 
 // ---------------------------------------------------------------------------
 // Geometry (metres).
@@ -43,7 +51,7 @@ const WORK_Z = -0.44;
 // the tip most of a bead width. 134mm still reads as a torch and halves it.
 const TORCH_REACH = 0.134;
 
-const TRAVEL_SPEED = 0.0030; // m/s, desktop W/S -- SMAW pace, much slower than MIG
+const TRAVEL_SPEED = APPLIED ? 0.002 : 0.0030; // m/s
 const LATERAL_SPEED = 0.008;
 const STANDOFF_SPEED = 0.008;
 const TILT_SPEED = 40; // deg/s
@@ -54,12 +62,13 @@ const BOOST = 8;
 // Renderer / scene / camera
 // ---------------------------------------------------------------------------
 const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, APPLIED ? 1 : 1.5));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.xr.enabled = true;
 // Update the tracked camera exactly once in our animation loop.
 renderer.xr.cameraAutoUpdate = false;
-renderer.xr.setFramebufferScaleFactor(0.85);
+renderer.xr.setReferenceSpaceType('local-floor');
+renderer.xr.setFramebufferScaleFactor(APPLIED ? 0.7 : 0.85);
 renderer.xr.setFoveation(1);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 // Without tone mapping the arc and the lamp highlights clip flat to white,
@@ -68,10 +77,12 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 0.95;
 document.body.appendChild(renderer.domElement);
-document.body.appendChild(VRButton.createButton(renderer));
+const vrEntry = document.createElement('div');
+vrEntry.hidden = APPLIED;
+if (!APPLIED) vrEntry.appendChild(VRButton.createButton(renderer));
+document.body.appendChild(vrEntry);
 
 const scene = new THREE.Scene();
-const handStability = new PoseStabilizer();
 scene.background = new THREE.Color(0x0a0d13);
 
 const camera = new THREE.PerspectiveCamera(52, window.innerWidth / window.innerHeight, 0.01, 50);
@@ -95,18 +106,27 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-scene.add(new THREE.HemisphereLight(0x9fc0e0, 0x14161c, 0.18));
-const keyLight = new THREE.DirectionalLight(0xffffff, 0.45);
-keyLight.position.set(0.9, 1.8, 1.2);
-scene.add(keyLight);
-buildWorkshop(scene, renderer);
+if (!APPLIED) {
+  scene.add(new THREE.HemisphereLight(0x9fc0e0, 0x14161c, 0.18));
+  const keyLight = new THREE.DirectionalLight(0xffffff, 0.45);
+  keyLight.position.set(0.9, 1.8, 1.2);
+  scene.add(keyLight);
+}
+const field = APPLIED ? await buildFieldWorkshop(scene, renderer) : null;
+if (!APPLIED) buildWorkshop(scene, renderer);
+const positioner = field ? new Positioner(field) : null;
 
 // ---------------------------------------------------------------------------
-// Workpiece. Translation only, so local directions double as world directions.
+// Workpiece. The field exercise inherits the positioner's articulated frame.
 // ---------------------------------------------------------------------------
-const workpiece = new THREE.Group();
-workpiece.position.set(0, WORK_HEIGHT, WORK_Z);
-scene.add(workpiece);
+const workpiece = field?.assembly ?? new THREE.Group();
+if (!APPLIED) {
+  workpiece.position.set(0, WORK_HEIGHT, WORK_Z);
+  scene.add(workpiece);
+}
+const workpieceOccluders = [];
+
+if (!APPLIED) {
 
 // Each surface here has a different history on a real joint, so each takes the
 // preset that matches: rolled backing plate, brushed pipe OD, unground bore,
@@ -168,38 +188,64 @@ rim.position.set(0, 0, PIPE_LENGTH);
 workpiece.add(rim);
 
 perforatedBench(workpiece, { width: 0.8, depth: 0.6, top: TABLE_TOP, z: -0.08 });
+workpieceOccluders.push(block, pipe, bore, rim);
+} else {
+  workpieceOccluders.push(field.assembly);
+}
 // ---------------------------------------------------------------------------
 // Seam, plan, guide, bead, scoring
 // ---------------------------------------------------------------------------
-const seam = pipeFilletSeam({
-  center: new THREE.Vector3(0, 0, 0),
-  wallNormal: new THREE.Vector3(0, 0, 1), // out of the block face, along the pipe
-  up: new THREE.Vector3(0, 1, 0),
-  radius: SEAM_RADIUS,
+const jointDefinitions = APPLIED ? fieldJointDefinitions(field.layout) : [null];
+const fieldArcLight = APPLIED ? new THREE.PointLight(0xbcd2ff, 0, 0.55, 2) : null;
+if (fieldArcLight) workpiece.add(fieldArcLight);
+const exercises = jointDefinitions.map(definition => {
+  const seam = definition ? createFieldSeam(definition) : pipeFilletSeam({
+    center: new THREE.Vector3(), wallNormal: new THREE.Vector3(0, 0, 1),
+    up: new THREE.Vector3(0, 1, 0), radius: SEAM_RADIUS,
+  });
+  const plan = APPLIED ? smallJointPlan(seam) : pipeFilletPlan(seam);
+  const guide = new CurvedGuide(workpiece, seam, plan, {
+    segments: APPLIED ? 64 : 160,
+    zoneHalfWidth: APPLIED ? 0.0022 : 0.0055, ringRadius: APPLIED ? 0.0024 : 0.006,
+  });
+  const bead = new WeldBead(workpiece, seam, {
+    ...weldBeadOptions({ scale: APPLIED ? 0.32 : 0.68, segments: APPLIED ? 192 : 320 }),
+    arcLight: fieldArcLight, sparkCount: APPLIED ? 80 : 160,
+  });
+  const session = new JointSession(seam, plan, {
+    standoffTol: APPLIED ? 0.0012 : 0.0024, lateralTol: APPLIED ? 0.0015 : 0.0035,
+    angleTol: 22, speedTol: APPLIED ? 0.0012 : 0.0018,
+  });
+  const poseGuide = new PoseGuide(workpiece, seam);
+  if (APPLIED) { poseGuide.ring.scale.setScalar(0.4); poseGuide.travel.setLength(0.015, 0.004, 0.002); }
+  guide.setVisible(false); poseGuide.setVisible(false);
+  return { definition, seam, plan, guide, bead, session, poseGuide,
+    demoPlayer: new MasterDemo(seam, plan, poseGuide), desktop: null };
 });
-
-const plan = pipeFilletPlan(seam);
-const guide = new CurvedGuide(workpiece, seam, plan, { zoneHalfWidth: 0.0055 });
-const bead = new WeldBead(workpiece, seam, {
-  segments: 320,
-  halfWidth: 0.0042,
-  height: 0.0026,
-  poolLength: 0.005,
-});
+let jointIndex = 0;
+let { seam, plan, guide, bead, session, poseGuide, demoPlayer } = exercises[0];
 // Tight to the nozzle. At 150mm the gauges sat outside the hood's useful cone
 // while the eye was on the puddle, so they were only ever read between runs.
 const hud = new TorchHud(scene, { width: 0.1, offset: 0.075 });
-// Behind and just above the work, bottom edge tucked behind the block, so the
-// board and the puddle sit in one glance instead of one being a head turn away.
+// Place the panel within reading distance, above the welding area. The basic
+// panel sits 24 cm behind the seam; the applied panel starts above the yaw sweep.
 const board = new StatsBoard(scene, {
-  width: 0.86,
-  position: new THREE.Vector3(0, WORK_HEIGHT + 0.24, WORK_Z - 0.6),
+  occluders: workpieceOccluders,
+  follow: APPLIED ? null : workpiece,
+  width: 0.62,
+  position: APPLIED ? new THREE.Vector3(0, 1.68, -0.62)
+    : new THREE.Vector3(0, WORK_HEIGHT + 0.43, WORK_Z - 0.24),
 });
-const session = new JointSession(seam, plan, { standoffTol: 0.0024, lateralTol: 0.0035, angleTol: 22, speedTol: 0.0018 });
 const visualFeatures = !new URLSearchParams(location.search).has('safe');
-const helmet = visualFeatures ? new HelmetView(scene, renderer, camera, controls, workpiece, new THREE.Vector3(0, 0.20, 0.32)) : null;
-const poseGuide = visualFeatures ? new PoseGuide(workpiece, seam) : null;
-bead.visualDetails = visualFeatures;
+// A seam anchor keeps the desktop helmet camera at the actual weld when its
+// parent has both a positioner transform and an offset from the pipe centre.
+const helmetAnchor = APPLIED ? new THREE.Object3D() : workpiece;
+if (APPLIED) {
+  helmetAnchor.position.copy(seam.center);
+  workpiece.add(helmetAnchor);
+}
+const helmet = visualFeatures ? new HelmetView(scene, renderer, camera, controls, helmetAnchor, new THREE.Vector3(0, 0.20, 0.32)) : null;
+if (APPLIED && helmet) helmet.eyeOffset.copy(jointDefinitions[0].viewOffset);
 
 // ---------------------------------------------------------------------------
 // Electrode. Stick, not MIG: a holder with a straight consumable rod, which is
@@ -224,8 +270,8 @@ const buildTorchMesh = buildStickHolder;
 // ---------------------------------------------------------------------------
 // VR controllers
 // ---------------------------------------------------------------------------
-const WELDING_HAND =
-  new URLSearchParams(location.search).get('hand') === 'left' ? 'left' : 'right';
+// Right physical controller welds; left physical controller moves the fixture.
+const WELDING_HAND = 'right';
 
 const vrTorch = buildTorchMesh();
 const gripMarker = new THREE.Mesh(
@@ -233,61 +279,67 @@ const gripMarker = new THREE.Mesh(
   new THREE.MeshStandardMaterial({ color: 0x47515f, metalness: 0.2, roughness: 0.8 })
 );
 
-const controllers = [0, 1].map((i) => {
-  const c = renderer.xr.getController(i);
+const physicalInput = new PhysicalControllers(scene, renderer);
+const controllers = physicalInput.controllers;
+controllers.forEach((c) => {
   c.userData.trigger = false;
   c.userData.handedness = null;
   c.addEventListener('selectstart', () => {
-    c.userData.trigger = true;
-    // The free hand's trigger restarts the joint. In the headset there is no
-    // keyboard and no DOM overlay, so without this a trainee who has made a
-    // mess has no way back except taking the headset off.
-    if (c !== rodController) resetJoint();
+    if (trainingUI.handleSelect(c)) return;
+    if (demo || positioner?.held) return;
+    c.userData.trigger = c === rodController;
   });
-  c.addEventListener('selectend', () => (c.userData.trigger = false));
-  c.addEventListener('squeezestart', () => startDrag(c));
-  c.addEventListener('squeezeend', () => endDrag(c));
+  c.addEventListener('selectend', () => {
+    c.userData.trigger = false;
+    c.userData.uiPressed = false;
+  });
+  c.addEventListener('squeezestart', () => {
+    if (c.userData.source?.hand || demo || trainingUI.blocksManipulation) return;
+    if (APPLIED) {
+      if (c === gripController && !isArcOn() && !trainingUI.controllerHit(c)) positioner.begin(c);
+    } else startDrag(c);
+  });
+  c.addEventListener('squeezeend', () => { endDrag(c); positioner?.end(c); });
   c.addEventListener('connected', (e) => {
+    c.userData.source = e.data;
     c.userData.handedness = e.data?.handedness ?? null;
     assignHands();
   });
   c.addEventListener('disconnected', () => {
+    c.userData.source = null;
+    c.userData.uiPressed = false;
     c.userData.handedness = null;
     c.userData.trigger = false;
     endDrag(c);
+    positioner?.end(c);
+    assignHands();
   });
-  scene.add(c);
-  return c;
 });
 
 let rodController = controllers[0];
 let gripController = controllers[1];
 
 function assignHands() {
-  rodController = controllers.find((c) => c.userData.handedness === WELDING_HAND) ?? controllers[0];
-  gripController = controllers.find((c) => c !== rodController);
+  rodController = physicalInput.right;
+  gripController = physicalInput.left;
   rodController.add(vrTorch);
   gripController.add(gripMarker);
 }
 assignHands();
 
 let drag = null;
-const _grab = new THREE.Vector3();
 
 function startDrag(controller) {
-  if (controller !== gripController || isArcOn() || !controller.visible) return;
-  controller.getWorldPosition(_grab);
-  drag = { controller, offset: workpiece.position.clone().sub(_grab) };
+  if (controller !== gripController || controller.userData.source?.hand || !controller.userData.source || demo || trainingUI.blocksManipulation || isArcOn() || !controller.visible) return;
+  if (!controller.userData.tracked) return;
+  drag = new WorkpieceGrab(controller, workpiece, 0.6, 1.5);
 }
 function endDrag(controller) {
   if (drag && drag.controller === controller) drag = null;
 }
-function updateDrag() {
+function updateDrag(dt) {
   if (!drag) return;
-  drag.controller.getWorldPosition(_grab);
-  if (isArcOn() || !drag.controller.visible) { drag = null; return; }
-  workpiece.position.lerp(_grab.clone().add(drag.offset), 0.2);
-  workpiece.position.y = THREE.MathUtils.clamp(workpiece.position.y, 0.6, 1.5);
+  if (isArcOn() || trainingUI.blocksManipulation || !drag.update(dt)) drag = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -301,34 +353,60 @@ function updateDrag() {
 const desktop = {
   p: 0,
   lateral: 0,
-  height: 0.0028,
-  travelAngle: -10,
+  height: APPLIED ? 0.002 : 0.0028,
+  travelAngle: APPLIED ? -8 : -10,
   workAngle: 0,
 };
 const desktopTorch = buildTorchMesh();
-poseGuide?.useTorch(desktopTorch);
+for (const exercise of exercises) exercise.poseGuide.useTorch(desktopTorch);
 workpiece.add(desktopTorch);
 
-let demo = false; // G: replay the master's own pass
-let demoAnnounced = false;
-const vrControls = new VRControls(scene, renderer, workpiece, { weldingHand: WELDING_HAND, onDemo: toggleDemo });
+let demo = false;
+const vrControls = new VRControls(scene, renderer, field?.yaw ?? workpiece, {
+  weldingHand: WELDING_HAND, onDemo: toggleDemo, applied: APPLIED,
+});
+board.configure('pipe', session);
+const trainingUI = new TrainingUI({
+  scene, renderer, camera, board, controllers, physicalInput, weldingHand: WELDING_HAND,
+  helmet, vrControls, getDemo: () => demo, toggleDemo,
+  supportsDemo: () => true, reset: resetJoint,
+  mode: APPLIED ? 'applied' : 'basic', positioner, resetPositioner,
+  getJointLabel: () => exercises[jointIndex].definition?.label,
+  nextJoint: APPLIED ? () => selectJoint(jointIndex + 1) : null,
+});
 
 function toggleDemo() {
-  demo = !demo;
-  demoAnnounced = false;
-  resetJoint();
-  desktopTorch.visible = !renderer.xr.isPresenting || demo;
-  vrTorch.visible = !demo;
+  if (demo) { demoPlayer.stop(); demo = false; assignHands(); }
+  else demo = demoPlayer.start(renderer.xr.isPresenting ? vrTorch : null, scene);
+  drag = null;
+  positioner?.end();
+  session.lastT = null;
+  session.speed = 0;
+  for (const c of controllers) c.userData.trigger = false;
+  desktopTorch.visible = !renderer.xr.isPresenting;
 }
 
 const keys = {};
 window.addEventListener('keydown', (e) => {
+  if (e.target?.matches('select, input, textarea')) return;
   keys[e.code] = true;
   if (e.code === 'KeyR') resetJoint();
   if (e.code === 'KeyG' && !e.repeat) toggleDemo();
-  if (e.code === 'Space') e.preventDefault();
+  if (APPLIED && !e.repeat) {
+    if (e.code === 'KeyH') resetPositioner();
+    if (e.code === 'Digit1') setFieldView('overview');
+    if (e.code === 'Digit2') setFieldView('joint');
+    if (e.code === 'Digit3') setFieldView('work');
+    if (e.code === 'KeyN') selectJoint(jointIndex + 1);
+    if (e.code === 'KeyP') selectJoint(jointIndex - 1);
+  }
+  if (e.code === 'Space' || (APPLIED && ['PageUp', 'PageDown'].includes(e.code))) e.preventDefault();
 });
 window.addEventListener('keyup', (e) => (keys[e.code] = false));
+window.addEventListener('blur', () => {
+  for (const key of Object.keys(keys)) keys[key] = false;
+  positioner?.end();
+});
 
 const overlay = document.getElementById('overlay');
 const readout = document.getElementById('readout');
@@ -336,17 +414,72 @@ const result = document.getElementById('result');
 
 renderer.xr.addEventListener('sessionstart', () => {
   controls.enabled = false;
-  handStability.reset();
   overlay.style.display = 'none';
-  desktopTorch.visible = demo;
-  vrTorch.visible = !demo;
+  if (demo) toggleDemo();
+  desktopTorch.visible = false;
+  vrTorch.visible = true;
 });
 renderer.xr.addEventListener('sessionend', () => {
+  if (demo) toggleDemo();
   controls.enabled = true;
-  handStability.reset();
   overlay.style.display = 'block';
   desktopTorch.visible = true;
+  positioner?.end();
 });
+
+function resetPositioner() {
+  if (!positioner || isArcOn() || demo) return;
+  positioner.home();
+  session.lastT = null; session.speed = 0;
+}
+
+function selectJoint(index) {
+  if (!APPLIED || isArcOn() || positioner.held) return;
+  if (demo) toggleDemo();
+  exercises[jointIndex].desktop = { ...desktop };
+  guide.setVisible(false); poseGuide.setVisible(false);
+  jointIndex = THREE.MathUtils.euclideanModulo(index, exercises.length);
+  ({ seam, plan, guide, bead, session, poseGuide, demoPlayer } = exercises[jointIndex]);
+  const initial = { p: 0, lateral: 0, height: 0.002, travelAngle: -8, workAngle: 0 };
+  Object.assign(desktop, exercises[jointIndex].desktop ?? initial);
+  session.lastT = null; session.speed = 0;
+  lastStrokeIndex = plan.index; wasFinished = session.finished;
+  board.configure('pipe', session); board.reset();
+  if (session.finished) showResult(); else result.style.display = 'none';
+  helmetAnchor.position.copy(seam.center);
+  if (helmet) helmet.eyeOffset.copy(jointDefinitions[jointIndex].viewOffset);
+  document.getElementById('field-joint').value = String(jointIndex);
+  if (!renderer.xr.isPresenting) setFieldView('joint');
+}
+
+function setFieldView(view) {
+  if (!field || renderer.xr.isPresenting) return;
+  if (helmet?.enabled) helmet.toggle();
+  if (view === 'joint') {
+    controls.target.copy(workpiece.localToWorld(seam.center.clone()));
+    camera.position.copy(workpiece.localToWorld(seam.center.clone().add(jointDefinitions[jointIndex].viewOffset)));
+  } else if (view === 'overview') {
+    camera.position.set(-0.8, 1.9, 3.2);
+    controls.target.set(-0.1, 1.15, -0.75);
+  } else {
+    camera.position.set(0, 1.72, 0.35);
+    controls.target.set(0, 1.47, -0.68);
+  }
+  controls.maxDistance = 6;
+  controls.update();
+}
+document.getElementById('field-overview')?.addEventListener('click', () => setFieldView('overview'));
+document.getElementById('field-closeup')?.addEventListener('click', () => setFieldView('joint'));
+document.getElementById('field-work')?.addEventListener('click', () => setFieldView('work'));
+document.getElementById('field-home')?.addEventListener('click', resetPositioner);
+if (APPLIED) setFieldView('work');
+if (APPLIED) {
+  const selector = document.getElementById('field-joint');
+  jointDefinitions.forEach((definition, index) => selector.add(new Option(definition.label, index)));
+  selector.addEventListener('change', () => {
+    selectJoint(Number(selector.value)); selector.value = String(jointIndex); selector.blur();
+  });
+}
 
 const _fwd = new THREE.Vector3();
 const _tip = new THREE.Vector3();
@@ -381,22 +514,11 @@ function rodForward(frame, travelAngleDeg, workAngleDeg, target) {
 }
 
 function updateDesktopRod(dt) {
-  if (renderer.xr.isPresenting && !demo) return;
+  if (renderer.xr.isPresenting || demo) return;
 
   const stroke = activeStroke();
 
-  if (demo) {
-    // Replay: drive progress at the master's own travel speed and put every
-    // other control exactly where the master would have it, weave included.
-    const target = stroke.sample(THREE.MathUtils.clamp(desktop.p, 0, 1));
-    const strokeLength = stroke.span * seam.length;
-    desktop.p += (target.speed / strokeLength) * dt;
-    desktop.lateral = stroke.lateralAt(THREE.MathUtils.clamp(desktop.p, 0, 1), seam.length);
-    desktop.height = target.standoff;
-    desktop.travelAngle = target.travelAngle;
-    desktop.workAngle = target.workAngle;
-    if (desktop.p > 1.02) desktop.p = 1.02; // let the stroke close out, then wait
-  } else {
+  {
     const boost = keys['ShiftLeft'] || keys['ShiftRight'] ? BOOST : 1;
     const strokeLength = stroke.span * seam.length;
     const step = ((TRAVEL_SPEED * boost) / strokeLength) * dt;
@@ -430,7 +552,7 @@ function updateDesktopRod(dt) {
 }
 
 function getTipLocal(target) {
-  if (renderer.xr.isPresenting && !demo) {
+  if (renderer.xr.isPresenting) {
     rodController.updateMatrixWorld(true);
     vrTorch.userData.tip.getWorldPosition(target);
     return workpiece.worldToLocal(target);
@@ -445,45 +567,45 @@ function getTipLocal(target) {
 }
 
 function getForwardLocal(target) {
-  if (renderer.xr.isPresenting && !demo) {
+  if (renderer.xr.isPresenting) {
     // The tip's own orientation, not the controller's. With a swan neck the
     // handle axis and the arc axis are 48 degrees apart, and grading the
     // handle would mark a correctly held gun as badly rolled.
     rodController.updateMatrixWorld(true);
     vrTorch.userData.tip.getWorldQuaternion(_q);
-    return target.set(0, 0, -1).applyQuaternion(_q);
+    target.set(0, 0, -1).applyQuaternion(_q);
+    workpiece.getWorldQuaternion(_q).invert();
+    return target.applyQuaternion(_q).normalize();
   }
   const stroke = activeStroke();
   const frame = seam.frameAt(stroke.tAt(desktop.p), _frame);
   return rodForward(frame, desktop.travelAngle, desktop.workAngle, target);
 }
 
-/** Where a stroke begins. The replay strikes back inside the tie-in overlap;
- *  a trainee is left to find it, because finding it is the skill. */
-function strokeStartP(stroke) {
-  return demo ? -stroke.leadP(seam.length) : 0;
+// A trainee starts at the beginning; the replay owns its separate cursor.
+function strokeStartP() {
+  return 0;
 }
 
 function isArcOn() {
-  if (demo) {
-    const lead = activeStroke().leadP(seam.length);
-    return desktop.p > -lead - 0.01 && desktop.p < 1.015;
-  }
-  return renderer.xr.isPresenting ? rodController.visible && rodController.userData.trigger : !!keys['Space'];
+  if (demo || positioner?.held || positioner?.moving || trainingUI.blocksArc(rodController)) return false;
+  return renderer.xr.isPresenting
+    ? rodController.visible && rodController.userData.handedness === WELDING_HAND && rodController.userData.trigger
+    : !!keys['Space'];
 }
 
 let lastStrokeIndex = 0;
 
 function resetJoint() {
-  handStability.reset();
+  if (demo) toggleDemo();
   poseGuide?.reset();
   session.reset();
   bead.reset();
   board.reset();
   desktop.p = strokeStartP(activeStroke());
   desktop.lateral = 0;
-  desktop.height = 0.0028;
-  desktop.travelAngle = -10;
+  desktop.height = APPLIED ? 0.002 : 0.0028;
+  desktop.travelAngle = APPLIED ? -8 : -10;
   desktop.workAngle = 0;
   lastStrokeIndex = 0;
   result.style.display = 'none';
@@ -527,16 +649,51 @@ function readViewerPosition(xrFrame) {
 function animate(time, xrFrame) {
   const dt = Math.min(clock.getDelta(), 0.05);
   if (renderer.xr.isPresenting) renderer.xr.updateCamera(camera);
+  physicalInput.update(xrFrame, dt);
 
   if (renderer.xr.isPresenting) readViewerPosition(xrFrame);
   else _viewer.copy(camera.position);
   vrControls.update(_viewer, demo);
-  updateDrag();
+  trainingUI.update(xrFrame);
+  // Previously welded joints remain visible and cool while another is active.
+  for (let i = 0; i < exercises.length; i++) {
+    if (i !== jointIndex) exercises[i].bead.update(dt, { arcOn: false, point: exercises[i].seam.start, t: 0, passive: true });
+  }
+  if (positioner) {
+    // Read raw arc intent so simultaneous keyboard motion cannot start an arc
+    // while a workpiece transform is still being applied.
+    const arcRequested = renderer.xr.isPresenting ? !!rodController.userData.trigger : !!keys.Space;
+    positioner.update(dt, keys, {
+      blocked: demo || trainingUI.blocksManipulation || (arcRequested && !positioner.held),
+      xr: renderer.xr.isPresenting,
+      controller: gripController,
+    });
+    if (positioner.held || positioner.moving) {
+      session.lastT = null; session.speed = 0;
+    }
+  }
+  gripMarker.visible = gripController.visible;
+  vrTorch.visible = demo || (renderer.xr.isPresenting && !!rodController.userData.source
+    && !rodController.userData.source.hand && rodController.userData.handedness === WELDING_HAND);
+  if (demo) {
+    demoPlayer.update(dt);
+    guide.setVisible(false);
+    hud.setVisible(false);
+    bead.update(dt, { arcOn: false, point: _contact, t: 0 });
+    board.update(dt);
+    helmet?.update(false);
+    if (!renderer.xr.isPresenting) controls.update();
+    renderer.render(scene, camera);
+    window.weldReady = true;
+    return;
+  }
+  guide.setVisible(trainingUI.guides);
+  hud.setVisible(trainingUI.guides);
+  if (!APPLIED) updateDrag(dt);
   updateDesktopRod(dt);
   getTipLocal(_tip);
   getForwardLocal(_fwd);
-  if (renderer.xr.isPresenting && !demo) handStability.update(dt, _tip, _fwd);
-  else handStability.reset();
+  // The displayed controller pose is already filtered; score that same pose.
 
   const arcOn = isArcOn() && !session.finished;
   const m = session.sample(dt, _tip, _fwd, arcOn);
@@ -610,9 +767,11 @@ function animate(time, xrFrame) {
   if (readoutTimer > 0.1 && readout) {
     readoutTimer = 0;
     const hour = Math.round(m.clock) % 12;
-    const posture =
-      m.clock > 10.5 || m.clock < 1.5 ? '아래보기' : m.clock > 4.5 && m.clock < 7.5 ? '위보기' : '수직';
-    const label = m.stroke ? m.stroke.label : '완료';
+    // Positioner rotation changes gravity relative to the local clock face.
+    const worldNormal = seam.frameAt(m.t, _frame).normal.clone();
+    workpiece.getWorldQuaternion(_q); worldNormal.applyQuaternion(_q);
+    const posture = worldNormal.y > 0.35 ? '아래보기' : worldNormal.y < -0.35 ? '위보기' : '수직';
+    const label = (APPLIED ? jointDefinitions[jointIndex].label + ' · ' : '') + (m.stroke ? m.stroke.label : '완료');
     readout.textContent =
       `${label}  ·  ${hour === 0 ? 12 : hour}시 방향(${posture})  ·  ` +
       `진행 ${Math.round(THREE.MathUtils.clamp(m.p, 0, 1) * 100)}%${m.onSeam ? '' : ' (이탈)'}  ·  ` +
@@ -622,13 +781,13 @@ function animate(time, xrFrame) {
       (m.target ? ` / 목표 ${(m.target.speed * 1000).toFixed(1)}mm/s` : '') +
       `  ·  작업각오차 ${m.workAngleDeg.toFixed(0)}°` +
       (demo ? '  ·  [명장 궤적 재생 중]' : '');
-    if (demo && !demoAnnounced) demoAnnounced = true;
+    if (positioner) document.getElementById('positioner-readout').textContent = positioner.readout;
   }
 
 
   const poseStroke = plan.current;
-  if (poseGuide) poseGuide.group.visible = poseGuide.path.visible = !!poseStroke;
-  if (poseStroke && poseGuide) {
+  poseGuide.setVisible(trainingUI.guides && !!poseStroke);
+  if (trainingUI.guides && poseStroke && poseGuide) {
     const p = THREE.MathUtils.clamp(session.stats?.maxP ?? 0, 0, 1);
     poseGuide.update(poseStroke.tAt(p), poseStroke.sample(p), poseStroke.dir,
       poseStroke.lateralAt(p, seam.length), fraction => {
@@ -642,8 +801,21 @@ function animate(time, xrFrame) {
   window.weldReady = true;
 }
 
+if (APPLIED) {
+  document.getElementById('loading-field').textContent = '작업장 재질을 준비하는 중…';
+  await renderer.compileAsync(scene, camera);
+  vrEntry.appendChild(VRButton.createButton(renderer));
+}
+document.getElementById('loading-field')?.remove();
+vrEntry.hidden = false;
 renderer.setAnimationLoop(animate);
 
 if (new URLSearchParams(location.search).has('debug')) {
-  window.weldDebug = { getTipLocal, getForwardLocal, updateDesktopRod, vrControls, toggleDemo, helmet, poseGuide, scene, camera, controls, renderer, seam, plan, guide, bead, hud, session, desktop, workpiece };
+  window.weldDebug = { field, positioner, physicalInput, board, trainingUI,
+    getTipLocal, getForwardLocal, updateDesktopRod, vrControls, toggleDemo, helmet,
+    scene, camera, controls, renderer, hud, desktop, workpiece, exercises, selectJoint,
+    get jointIndex() { return jointIndex; }, get seam() { return seam; },
+    get plan() { return plan; }, get guide() { return guide; }, get bead() { return bead; },
+    get session() { return session; }, get poseGuide() { return poseGuide; }, get demoPlayer() { return demoPlayer; },
+  };
 }

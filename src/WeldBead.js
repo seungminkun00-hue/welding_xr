@@ -15,6 +15,12 @@ const RIPPLES_PER_TILE = 8;
 const BEAD_SPAN_RATIO = 4.0 / 6.0;
 const HEAT_TAU = 1.1; // seconds for the glow to fall to 1/e
 
+// One finish for every exercise; only its physical size changes with the joint.
+export function weldBeadOptions({ scale = 1, segments = 480 } = {}) {
+  return { segments, halfWidth: 0.0062 * scale, height: 0.0032 * scale,
+    poolLength: 0.007 * scale, tintHalfWidth: 0.0062 * 3.4 * scale };
+}
+
 const BEAD_VERT = /* glsl */ `
   attribute vec3 aCenter;
   attribute float aSide;
@@ -26,6 +32,8 @@ const BEAD_VERT = /* glsl */ `
   attribute float aPhase;
   attribute vec3 aLateral;
   attribute vec3 aNormal;
+  attribute vec3 aSurfacePlus;
+  attribute vec3 aSurfaceMinus;
   uniform float uHalfWidth;
   uniform float uHeight;
   uniform float uRipplesPerTile;
@@ -54,16 +62,19 @@ const BEAD_VERT = /* glsl */ `
     float heightRipple = 0.62 + 0.38 * ridge;
     float lump = 1.0 + (1.0 - aQuality) * 0.18 * sin(aPhase * 3.7 + aSide * 8.0);
 
+    float across = aOffset + aSide * uHalfWidth * aWidth * widthRipple;
+    vec3 surface = across >= 0.0 ? aSurfacePlus : aSurfaceMinus;
     vec3 pos = aCenter
-      + aLateral * (aOffset + aSide * uHalfWidth * aWidth * widthRipple)
+      + surface * (abs(across) / uHalfWidth)
       + aNormal * (uHeight * aFill * crown * heightRipple * lump + 0.0004);
 
     // The baked tile carries the whole shape, so the shading frame here is the
     // flat plate the tile was baked against -- not the crowned profile, which
     // is already in the map and would otherwise be counted twice.
-    vNormalW = aNormal;
-    vLateralW = aLateral;
-    vTravelW = normalize(cross(aNormal, aLateral));
+    // Rigid positioner rotation must also rotate the metal's shading frame.
+    vNormalW = normalize(mat3(modelMatrix) * aNormal);
+    vLateralW = normalize(mat3(modelMatrix) * aLateral);
+    vTravelW = normalize(cross(vNormalW, vLateralW));
 
     // Phase, not distance, drives the texture along travel. That is what keeps
     // the ripple spacing tied to how fast the trainee is moving: the arc pulses
@@ -175,9 +186,8 @@ const HAZ_VERT = /* glsl */ `
     vSide = aSide;
     vFill = aFill;
     vAlong = aCenter.x * 91.0 + aCenter.z * 73.0;
-    vec3 pos = aCenter
-      + aLateral * (aSide * uHalfWidth)
-      + aNormal * 0.00018;
+    // aCenter is already projected to the actual parent-metal surface.
+    vec3 pos = aCenter + aNormal * 0.00018;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
   }
 `;
@@ -288,10 +298,12 @@ const _frame = {
  */
 export class WeldBead {
   constructor(parent, seam, options = {}) {
+    options = { ...weldBeadOptions(), ...options,
+      tintHalfWidth: options.tintHalfWidth ?? (options.halfWidth ?? 0.0062) * 3.4 };
     this.parent = parent;
     this.seam = seam;
     this.time = 0;
-    this.visualDetails = options.visualDetails !== false;
+    this.visualDetails = true;
 
     this.segments = options.segments ?? 480;
     this.halfWidth = options.halfWidth ?? 0.0062; // at nominal travel speed
@@ -306,6 +318,9 @@ export class WeldBead {
     // every ring of the bead is extruded along a different pair of axes.
     const aLateral = new Float32Array(count * 3);
     const aNormal = new Float32Array(count * 3);
+    const aSurfacePlus = new Float32Array(count * 3);
+    const aSurfaceMinus = new Float32Array(count * 3);
+    const plus = new THREE.Vector3(), minus = new THREE.Vector3();
     const aSide = new Float32Array(count);
     this.aOffset = new Float32Array(count);
     this.aFill = new Float32Array(count);
@@ -319,6 +334,13 @@ export class WeldBead {
       const t = i / this.segments;
       seam.pointAt(t, _pt);
       const frame = seam.frameAt(t, _frame);
+      if (seam.surfacePoint) {
+        seam.surfacePoint(t, this.halfWidth, plus).sub(_pt);
+        seam.surfacePoint(t, -this.halfWidth, minus).sub(_pt);
+      } else {
+        plus.copy(frame.lateral).multiplyScalar(this.halfWidth);
+        minus.copy(frame.lateral).multiplyScalar(-this.halfWidth);
+      }
       for (let c = 0; c < COLS; c++) {
         const v = i * COLS + c;
         aCenter[v * 3] = _pt.x;
@@ -331,6 +353,8 @@ export class WeldBead {
         aNormal[v * 3 + 1] = frame.normal.y;
         aNormal[v * 3 + 2] = frame.normal.z;
         aSide[v] = SIDES[c];
+        plus.toArray(aSurfacePlus, v * 3);
+        minus.toArray(aSurfaceMinus, v * 3);
       }
       if (i < this.segments) {
         for (let c = 0; c < COLS - 1; c++) {
@@ -348,6 +372,8 @@ export class WeldBead {
     geometry.setAttribute('aCenter', new THREE.BufferAttribute(aCenter, 3));
     geometry.setAttribute('aLateral', new THREE.BufferAttribute(aLateral, 3));
     geometry.setAttribute('aNormal', new THREE.BufferAttribute(aNormal, 3));
+    geometry.setAttribute('aSurfacePlus', new THREE.BufferAttribute(aSurfacePlus, 3));
+    geometry.setAttribute('aSurfaceMinus', new THREE.BufferAttribute(aSurfaceMinus, 3));
     geometry.setAttribute('aSide', new THREE.BufferAttribute(aSide, 1));
     this.offsetAttr = new THREE.BufferAttribute(this.aOffset, 1);
     this.fillAttr = new THREE.BufferAttribute(this.aFill, 1);
@@ -387,7 +413,7 @@ export class WeldBead {
     parent.add(this.mesh);
     this._loadBeadMaps(material);
 
-    this._buildPool();
+    this._buildPool(options);
     this._buildHeatTint(options);
     this._buildSparks(options.sparkCount ?? 160);
     this.spatter = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1, 1),
@@ -402,6 +428,7 @@ export class WeldBead {
 
     this.filledSegments = 0;
     this.anyHeat = false;
+    this.mesh.visible = this.heatTint.visible = this.pool.visible = this.sparks.visible = false;
   }
 
   /**
@@ -415,6 +442,7 @@ export class WeldBead {
    * @param {number} m.quality    0..1, how well the torch is being handled
    */
   deposit(dt, m) {
+    this.mesh.visible = this.heatTint.visible = true;
     // Deposition per unit length goes as 1/speed: crawl and it piles up, race
     // and it starves.
     const ratio = Math.max(m.speedRatio, 0.12);
@@ -422,13 +450,21 @@ export class WeldBead {
     const phase = this.time * Math.PI * 2 * RIPPLE_HZ;
 
     const halfT = this.poolLength / this.seam.length;
-    const lo = Math.max(0, Math.floor((m.t - halfT) * this.segments));
-    const hi = Math.min(this.segments, Math.ceil((m.t + halfT * 0.35) * this.segments));
+    const lo = Math.floor((m.t - halfT) * this.segments);
+    const hi = Math.ceil((m.t + halfT * 0.35) * this.segments);
     if (hi < lo) return;
+    const rows = new Set();
+    for (let i = lo; i <= hi; i++) {
+      if (this.seam.closed) {
+        const row = THREE.MathUtils.euclideanModulo(i, this.segments);
+        rows.add(row);
+        if (row === 0) rows.add(this.segments); // identical closing vertex row
+      } else if (i >= 0 && i <= this.segments) rows.add(i);
+    }
 
     const blend = 1 - Math.exp(-dt * 14);
 
-    for (let i = lo; i <= hi; i++) {
+    for (const i of rows) {
       for (let c = 0; c < COLS; c++) {
         const v = i * COLS + c;
         this.aFill[v] = THREE.MathUtils.lerp(this.aFill[v], 1, blend);
@@ -444,7 +480,7 @@ export class WeldBead {
       }
     }
 
-    for (let i = lo; i <= hi; i++) {
+    for (const i of rows) {
       for (let c = 0; c < HAZ_COLS; c++) {
         const v = i * HAZ_COLS + c;
         this.hazFill[v] = THREE.MathUtils.lerp(this.hazFill[v], 1, blend);
@@ -452,7 +488,11 @@ export class WeldBead {
     }
     this.hazFillAttr.needsUpdate = true;
 
-    this.filledSegments = Math.max(this.filledSegments, hi);
+    // Deposited geometry changes here, not on every idle/cooling frame.
+    this.fillAttr.needsUpdate = this.widthAttr.needsUpdate = true;
+    this.offsetAttr.needsUpdate = this.qualityAttr.needsUpdate = this.phaseAttr.needsUpdate = true;
+
+    this.filledSegments = Math.max(this.filledSegments, ...rows);
     this.anyHeat = true;
     this._emitSparks(m, dt);
     this.spatterAcc += this.visualDetails ? dt * (2 + (1 - m.quality) * 22) : 0;
@@ -463,6 +503,10 @@ export class WeldBead {
         .addScaledVector(frame.lateral, m.lateral + (Math.random() < 0.5 ? -1 : 1) * this.halfWidth * (1.1 + Math.random() * 1.5))
         .addScaledVector(frame.travel, (Math.random() - 0.5) * 0.012)
         .addScaledVector(frame.normal, 0.0004);
+      if (this.seam.surfacePoint) {
+        const side = (Math.random() < 0.5 ? -1 : 1) * this.halfWidth * (1.1 + Math.random());
+        this.seam.surfacePoint(m.t, side, this.spatterDummy.position).addScaledVector(frame.normal, 0.00025);
+      }
       const size = 0.00018 + Math.random() * 0.00042;
       this.spatterDummy.scale.set(size, size, size);
       this.spatterDummy.updateMatrix();
@@ -493,18 +537,26 @@ export class WeldBead {
       this.heatAttr.needsUpdate = true;
     }
 
-    this.fillAttr.needsUpdate = true;
-    this.widthAttr.needsUpdate = true;
-    this.offsetAttr.needsUpdate = true;
-    this.qualityAttr.needsUpdate = true;
-    this.phaseAttr.needsUpdate = true;
-
     const arc = s.arcOn ? 1 : 0;
     this.poolArc = THREE.MathUtils.lerp(this.poolArc ?? 0, arc, 1 - Math.exp(-dt * 18));
+    this.pool.visible = this.poolArc > 0.002;
+    // Cool completed joints without touching the shared active arc light or
+    // projecting an invisible puddle onto curved surfaces every frame.
+    if (s.passive || !this.pool.visible) {
+      this.pool.material.uniforms.uArc.value = this.poolArc;
+      if (!s.passive) this.light.intensity = 0;
+      if (this.sparks.visible) this._updateSparks(dt);
+      return;
+    }
     // On a curved seam the puddle has to be re-aimed every frame: the surface
     // it lies on rotates underneath it as the welder travels.
     const poolFrame = this.seam.frameAt(s.t ?? 0, _frame);
-    this.pool.position.copy(s.point).addScaledVector(poolFrame.normal, 0.0022);
+    if (this.seam.surfacePoint) {
+      this.seam.pointAt(s.t ?? 0, _pt);
+      const lateral = _pt.subVectors(s.point, _pt).dot(poolFrame.lateral);
+      this.seam.surfacePoint(s.t ?? 0, lateral, this.pool.position);
+    } else this.pool.position.copy(s.point);
+    this.pool.position.addScaledVector(poolFrame.normal, Math.min(0.0022, this.height * 0.75));
     this.pool.quaternion.setFromUnitVectors(_unitZ, poolFrame.normal);
     this.pool.material.uniforms.uTime.value = this.time;
     this.pool.material.uniforms.uArc.value = this.poolArc;
@@ -531,6 +583,8 @@ export class WeldBead {
     this.phaseAttr.needsUpdate = true;
     this.filledSegments = 0;
     this.anyHeat = false;
+    this.mesh.visible = this.heatTint.visible = this.pool.visible = this.sparks.visible = false;
+    this.poolArc = 0;
     this.sparkLife.fill(0);
     this.sparkAlpha.fill(0);
     this.sparks.geometry.attributes.aAlpha.needsUpdate = true;
@@ -574,6 +628,8 @@ export class WeldBead {
    * the steel texture underneath.
    */
   _buildHeatTint(options = {}) {
+    const tintHalfWidth = options.tintHalfWidth ?? this.halfWidth * 3.4;
+    const surface = new THREE.Vector3();
     const segments = this.segments;
     const count = (segments + 1) * HAZ_COLS;
     const aCenter = new Float32Array(count * 3);
@@ -589,9 +645,10 @@ export class WeldBead {
       const frame = this.seam.frameAt(t, _frame);
       for (let c = 0; c < HAZ_COLS; c++) {
         const v = i * HAZ_COLS + c;
-        aCenter[v * 3] = _pt.x;
-        aCenter[v * 3 + 1] = _pt.y;
-        aCenter[v * 3 + 2] = _pt.z;
+        const across = HAZ_SIDES[c] * tintHalfWidth;
+        if (this.seam.surfacePoint) this.seam.surfacePoint(t, across, surface);
+        else surface.copy(_pt).addScaledVector(frame.lateral, across);
+        surface.toArray(aCenter, v * 3);
         aLateral[v * 3] = frame.lateral.x;
         aLateral[v * 3 + 1] = frame.lateral.y;
         aLateral[v * 3 + 2] = frame.lateral.z;
@@ -632,6 +689,7 @@ export class WeldBead {
       // the plate for the depth buffer or punch a hole in what draws after it.
       depthWrite: false,
       side: THREE.DoubleSide,
+      forceSinglePass: true,
     });
 
     this.heatTint = new THREE.Mesh(geometry, material);
@@ -665,7 +723,7 @@ export class WeldBead {
     loader.load('./assets/bead_ao.png', arrive('uBeadAO'));
   }
 
-  _buildPool() {
+  _buildPool(options = {}) {
     const material = new THREE.ShaderMaterial({
       uniforms: { uTime: { value: 0 }, uArc: { value: 0 } },
       vertexShader: POOL_VERT,
@@ -674,8 +732,10 @@ export class WeldBead {
       depthWrite: false,
       blending: THREE.AdditiveBlending,
       side: THREE.DoubleSide,
+      forceSinglePass: true,
     });
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.02, 0.02), material);
+    const poolSize = 0.02 * this.halfWidth / 0.0062;
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(poolSize, poolSize), material);
     mesh.quaternion.setFromUnitVectors(_unitZ, this.seam.normal);
     mesh.frustumCulled = false;
     this.parent.add(mesh);
@@ -686,8 +746,8 @@ export class WeldBead {
     // the arc looked wrong: a welding arc runs around 6000 K and throws a cold
     // blue-white light, never a green one. Reach extended too -- an arc is by
     // far the brightest thing in the shop and does light the bench around it.
-    this.light = new THREE.PointLight(0xbcd2ff, 0, 0.55, 2);
-    this.parent.add(this.light);
+    this.light = options.arcLight ?? new THREE.PointLight(0xbcd2ff, 0, 0.55, 2);
+    if (!options.arcLight) this.parent.add(this.light);
   }
 
   _buildSparks(count) {
@@ -753,6 +813,7 @@ export class WeldBead {
   }
 
   _emitSparks(m, dt) {
+    this.sparks.visible = true;
     // Spatter scales with how badly the torch is being held -- a clean weld is
     // a quiet one.
     const rate = 40 + (1 - m.quality) * 180;
@@ -761,7 +822,8 @@ export class WeldBead {
     this.sparkEmitAcc -= n;
 
     const sparkFrame = this.seam.frameAt(m.t, _frame);
-    this.seam.pointAt(m.t, _pt).addScaledVector(sparkFrame.lateral, m.lateral);
+    if (this.seam.surfacePoint) this.seam.surfacePoint(m.t, m.lateral, _pt);
+    else this.seam.pointAt(m.t, _pt).addScaledVector(sparkFrame.lateral, m.lateral);
     for (let k = 0; k < n; k++) {
       const i = this.sparkCursor;
       this.sparkCursor = (this.sparkCursor + 1) % this.sparkCount;
@@ -842,5 +904,6 @@ export class WeldBead {
       this.sparks.geometry.attributes.aAlpha.needsUpdate = true;
       this.sparks.geometry.attributes.aHeat.needsUpdate = true;
     }
+    this.sparks.visible = alive;
   }
 }

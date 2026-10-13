@@ -138,8 +138,7 @@ export const RING_FRAG = /* glsl */ `
     // Off the seam the marker holds position but empties out, so it reads as a
     // place to return to rather than as a live contact point.
     float filled = core * 0.85 * uEngaged;
-    float blink = 0.75 + 0.25 * sin(uTime * 5.0);
-    float dim = mix(0.5 * blink, 1.0, uEngaged);
+    float dim = mix(0.5, 1.0, uEngaged);
 
     float alpha = clamp(ring + filled + pulse, 0.0, 1.0) * uOpacity * dim;
     if (alpha < 0.01) discard;

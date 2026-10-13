@@ -1,0 +1,20 @@
+{
+  "glb_bytes": 8183012,
+  "meshes": 33,
+  "triangles": 89132,
+  "lift_nodes": [
+    "LiftTop",
+    "LiftMechanism"
+  ],
+  "units": "metres",
+  "pipe_radius": 0.07,
+  "pipe_length": 1.5,
+  "small_pipe_radius": 0.008,
+  "training_joints": [
+    "line-0-side",
+    "line-0-base"
+  ],
+  "pipe_material": "Existing polishedTube PBR, 60 mm tile, normal strength 0.18",
+  "reference": "IMG_0548.JPG + 10 supplementary photos + selected MOV frames",
+  "dimensions": "Estimated from photographs; no measured calibration supplied."
+}

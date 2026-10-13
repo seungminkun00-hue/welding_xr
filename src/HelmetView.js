@@ -17,8 +17,8 @@ export class HelmetView {
           vec3 sceneColor=texture2D(uScene,vUv).rgb;
           float luminance=dot(sceneColor,vec3(0.2126,0.7152,0.0722));
           float intensity=pow(luminance,1.35)*mix(0.22,0.65,uArc);
-          float grain=fract(sin(dot(vUv+uTime,vec2(12.9898,78.233)))*43758.5453)-0.5;
-          intensity=max(0.0,intensity+grain*0.008*sqrt(luminance));
+          // A stationary view must not shimmer with time-varying screen noise.
+          intensity=max(0.0,intensity);
           vec3 phosphor=vec3(0.10,1.0,0.18)*intensity;
           gl_FragColor=vec4(phosphor*aperture*vignette,1.0);
         }`,
@@ -63,8 +63,9 @@ export class HelmetView {
   enterCamera() {
     if (this.saved) return;
     this.saved = { position: this.camera.position.clone(), target: this.controls.target.clone() };
-    this.camera.position.copy(this.workpiece.position).add(this.eyeOffset);
-    this.controls.target.copy(this.workpiece.position);
+    this.workpiece.updateWorldMatrix(true, false);
+    this.camera.position.copy(this.workpiece.localToWorld(this.eyeOffset.clone()));
+    this.workpiece.getWorldPosition(this.controls.target);
     this.controls.update();
   }
   restoreCamera() {
@@ -83,7 +84,7 @@ export class HelmetView {
   }
   update(arcOn) {
     const inputs = this.renderer.xr.getSession()?.inputSources ?? [];
-    const left = Array.from(inputs).find(s => s.handedness === 'left');
+    const left = Array.from(inputs).find(s => !s.hand && s.handedness === 'left');
     // xr-standard: primary face button is index 4 (X on the left Quest hand).
     const pressed = left?.gamepad?.mapping === 'xr-standard' && !!left.gamepad.buttons[4]?.pressed;
     if (pressed && !this.xDown) this.toggle();

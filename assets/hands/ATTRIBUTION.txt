@@ -1,0 +1,17 @@
+Left hand base mesh:
+WebXR Input Profiles / generic-hand (MIT License)
+https://github.com/immersive-web/webxr-input-profiles/tree/main/packages/assets/profiles/generic-hand
+Downloaded from:
+https://raw.githubusercontent.com/immersive-web/webxr-input-profiles/main/packages/assets/profiles/generic-hand/left.glb
+SHA-256: bc67783144944ea1cda54d9247885825ea5fb9d4651469fe7d00be517a5c2b87
+Copyright (c) 2019 Amazon. Full license: LICENSE.txt
+
+The base mesh is rendered with application-authored leather material,
+1.2 mm surface padding, palm color panels, and a gauntlet sleeve with seams.
+The downloaded GLB itself is unchanged.
+
+GLTFLoader.js and BufferGeometryUtils.js:
+three.js r160 (MIT License)
+https://github.com/mrdoob/three.js/tree/r160/examples/jsm
+Copyright 2010-2023 three.js authors.
+Full license: ../../vendor/THREE-LICENSE.txt

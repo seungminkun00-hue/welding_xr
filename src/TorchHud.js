@@ -3,7 +3,7 @@ import * as THREE from 'three';
 const CELL = 320;
 const CANVAS_W = CELL * 3;
 const CANVAS_H = CELL;
-const REDRAW_HZ = 30;
+const REDRAW_HZ = 12;
 
 const GREEN = '#2fe36a';
 const YELLOW = '#ffd21e';
@@ -82,6 +82,7 @@ export class TorchHud {
    * @param {THREE.Vector3} s.viewer world-space head/camera position
    */
   update(dt, s) {
+    if (!this.mesh.visible) return;
     this.targetPosition.copy(s.anchor);
     this.targetPosition.y += this.offset;
     if (!this.anchored || this.mesh.position.distanceTo(this.targetPosition) > 0.2) {

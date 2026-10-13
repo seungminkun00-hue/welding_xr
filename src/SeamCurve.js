@@ -250,6 +250,18 @@ export function pipeFilletSeam({ center, wallNormal, up, radius, resolution = 48
   seam.axis = axis;
   seam.upAxis = u;
   seam.rightAxis = v;
+  seam.surfacePoint = (t, lateral, target = new THREE.Vector3()) => {
+    const frame = seam.frameAt(t);
+    const p = seam.pointAt(t).addScaledVector(frame.lateral, lateral);
+    const relative = p.clone().sub(center);
+    const along = relative.dot(axis);
+    const onPlate = p.clone().addScaledVector(axis, -along);
+    const radial = relative.addScaledVector(axis, -along).normalize();
+    const onPipe = center.clone().addScaledVector(axis, along).addScaledVector(radial, radius);
+    const plateLift = onPlate.clone().sub(p).dot(frame.normal);
+    const pipeLift = onPipe.clone().sub(p).dot(frame.normal);
+    return target.copy(plateLift >= pipeLift ? onPlate : onPipe);
+  };
 
   /**
    * Clock position in hours (0..12) measured from the top of the circle.

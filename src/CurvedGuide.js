@@ -167,6 +167,7 @@ class StrokeGuide {
     const positions = new Float32Array((n + 1) * 2 * 3);
     const aT = new Float32Array((n + 1) * 2);
     const aSide = new Float32Array((n + 1) * 2);
+    const surface = new THREE.Vector3();
     const indices = [];
 
     for (let i = 0; i <= n; i++) {
@@ -178,9 +179,10 @@ class StrokeGuide {
       for (let s = 0; s < 2; s++) {
         const side = s === 0 ? -1 : 1;
         const v = i * 2 + s;
-        positions[v * 3] = _p.x + frame.lateral.x * (side * halfWidth + lateralOffset) + frame.normal.x * lift;
-        positions[v * 3 + 1] = _p.y + frame.lateral.y * (side * halfWidth + lateralOffset) + frame.normal.y * lift;
-        positions[v * 3 + 2] = _p.z + frame.lateral.z * (side * halfWidth + lateralOffset) + frame.normal.z * lift;
+        const across = side * halfWidth + lateralOffset;
+        if (this.seam.surfacePoint) this.seam.surfacePoint(t, across, surface);
+        else surface.copy(_p).addScaledVector(frame.lateral, across);
+        surface.addScaledVector(frame.normal, lift).toArray(positions, v * 3);
         aT[v] = f;
         aSide[v] = side;
       }
@@ -218,6 +220,7 @@ class StrokeGuide {
       depthTest: false,
       blending,
       side: THREE.DoubleSide,
+      forceSinglePass: true,
     });
 
     const mesh = new THREE.Mesh(geometry, material);

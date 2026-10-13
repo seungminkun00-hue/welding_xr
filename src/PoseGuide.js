@@ -39,7 +39,7 @@ export class PoseGuide {
     this.group.add(this.ghostTorch);
     this.rod.visible = this.handle.visible = false;
   }
-  setVisible(visible) { this.group.visible = visible; }
+  setVisible(visible) { this.group.visible = this.path.visible = visible; }
 
   reset() { this.initialized = false; }
   update(t, target, dir = 1, lateral = 0, trajectory = null, dt = 0) {

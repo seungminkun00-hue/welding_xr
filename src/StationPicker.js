@@ -87,7 +87,7 @@ export class StationPicker {
    * @param {boolean} blocked  something nearer already claimed the ray
    */
   update(dt, raycaster, activeId, blocked = false) {
-    const hit = raycaster && !blocked ? this._cast(raycaster) : null;
+    const hit = raycaster && !blocked ? this.pick(raycaster) : null;
     this.hovered = hit;
 
     for (const station of this.stations) {
@@ -103,7 +103,7 @@ export class StationPicker {
     return hit;
   }
 
-  _cast(raycaster) {
+  pick(raycaster) {
     for (const station of this.stations) {
       if (raycaster.intersectObjects(station.picks, true).length) return station;
     }

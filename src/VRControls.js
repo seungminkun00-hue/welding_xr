@@ -1,10 +1,10 @@
 import * as THREE from 'three';
 
 export class VRControls {
-  constructor(scene, renderer, workpiece, { weldingHand = 'right', onDemo = null } = {}) {
-    Object.assign(this, { renderer, workpiece, weldingHand, onDemo });
+  constructor(scene, renderer, workpiece, { weldingHand = 'right', onDemo = null, applied = false } = {}) {
+    Object.assign(this, { renderer, workpiece, weldingHand, onDemo, applied });
     this.down = { y: false, b: false };
-    this.helpVisible = true;
+    this.helpVisible = false;
     this.canvas = document.createElement('canvas');
     this.canvas.width = 1024;
     this.canvas.height = 640;
@@ -30,28 +30,36 @@ export class VRControls {
     ctx.font = 'bold 54px sans-serif';
     ctx.fillStyle = '#6effbf';
     ctx.fillText('VR 조작 안내', 40, 72);
-    ctx.font = '40px sans-serif';
+    ctx.font = '36px sans-serif';
     ctx.fillStyle = '#ffffff';
     const torch = this.weldingHand === 'left' ? '왼손' : '오른손';
     const free = this.weldingHand === 'left' ? '오른손' : '왼손';
-    const lines = [
-      `${torch} 그립 : 용접봉 쥐기 / 놓기`,
-      `${torch} 그립 + 트리거 : 아크`,
-      `${free} 트리거 : 작업물 선택 · 서랍 · 다시하기`,
-      `${free} 그립 : 작업대 이동 (아크 OFF)`,
-      '왼손 X : 용접 마스크 · Y : 시범 재생',
-      '자세한 설명 : 작업대 밑 서랍 속 종이',
+    const lines = this.applied ? [
+      '오른손 트리거 : 용접 아크',
+      '왼손 그립 : 잡은 채 축 둘레를 따라 수평 회전',
+      '왼쪽 스틱 위·아래 : 작업대 높이 조절',
+      '전광판 : 왼쪽 트리거를 누른 채 이동',
+      '놓으면 고정 / 전광판 버튼은 짧게 클릭',
+      '왼손 X : 마스크 / Y : 시연 / 오른손 B : 안내',
+    ] : [
+      `${torch} 컨트롤러 : 운봉 / 트리거 : 아크`,
+      '통합 작업실 : 그립으로 운봉을 쥐고 작업',
+      '전광판 : 왼쪽 트리거로 잡고 이동 / 놓아 고정',
+      `${free} 컨트롤러 그립 : 작업대 이동`,
+      '왼손 X : 마스크 / Y : 고스트 시연',
+      '오른손 B : 이 안내 표시 / 숨기기',
     ];
     lines.forEach((line, i) => ctx.fillText(line, 40, 140 + i * 64));
     ctx.fillStyle = demo ? '#ffdb67' : '#8daabc';
-    ctx.font = 'bold 38px sans-serif';
-    ctx.fillText(demo ? '시범 재생 중 · Y를 눌러 직접 연습' : '직접 연습 중', 40, 580);
+    ctx.font = 'bold 34px sans-serif';
+    ctx.fillText(demo ? '시연 중 · 고스트만 이동 / 연습 기록 보존'
+      : this.applied ? '응용연습 · 아크를 끄고 자세를 조절하세요' : '기초연습 · 설정에서 가이드 선택', 40, 580);
     this.texture.needsUpdate = true;
   }
   update(viewer, demo) {
     const inputs = Array.from(this.renderer.xr.getSession()?.inputSources ?? []);
     const pressed = hand => {
-      const source = inputs.find(s => s.handedness === hand);
+      const source = inputs.find(s => !s.hand && s.handedness === hand);
       return source?.gamepad?.mapping === 'xr-standard' && !!source.gamepad.buttons[5]?.pressed;
     };
     const y = pressed('left');
