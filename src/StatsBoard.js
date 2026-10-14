@@ -14,34 +14,33 @@ export class StatsBoard {
     this.session = null;
     this.sampleTimer = this.redrawTimer = 0;
     this.traces = { arc: [], speed: [], work: [], travel: [] };
+    this.traceRevision = 0;
     this.settingsOpen = false;
     this.buttons = [];
     this.hovered = null;
     this.getSettings = () => ({});
     this.onAction = () => {};
-    this.moveDelta = new THREE.Vector3();
     this.canvas = document.createElement('canvas');
     this.canvas.width = W; this.canvas.height = H;
     this.ctx = this.canvas.getContext('2d');
     this.texture = new THREE.CanvasTexture(this.canvas);
     this.texture.colorSpace = THREE.SRGBColorSpace;
-    this.texture.minFilter = THREE.LinearFilter;
-    this.texture.generateMipmaps = false;
+    this.texture.minFilter = THREE.LinearMipmapLinearFilter;
+    this.texture.generateMipmaps = true;
+    this.texture.anisotropy = 4;
     const width = options.width ?? 0.86;
     this.mesh = new THREE.Mesh(new THREE.PlaneGeometry(width, width * H / W),
-      new THREE.MeshBasicMaterial({ map: this.texture, transparent: true, depthTest: true, depthWrite: true, toneMapped: false }));
+      new THREE.MeshBasicMaterial({ map: this.texture, transparent: true, blending: THREE.NoBlending,
+        depthTest: true, depthWrite: false, toneMapped: false }));
     this.mesh.position.copy(options.position ?? new THREE.Vector3(0, 1.55, -0.78));
     this.mesh.rotation.x = options.tilt ?? -0.16;
     // A physical board behind the work: respect opaque depth even when drawn
     // after the helmet filter. Never paint this panel over the training pipe.
     this.mesh.renderOrder = 100003;
+    this.mesh.frustumCulled = false;
     scene.add(this.mesh);
-    this.frame = new THREE.Mesh(new THREE.PlaneGeometry(width * 1.03, width * H / W * 1.045),
-      new THREE.MeshBasicMaterial({ color: 0x424a58, transparent: true, depthTest: true, depthWrite: true, toneMapped: false }));
-    this.frame.position.copy(this.mesh.position).add(new THREE.Vector3(0, 0, -0.004));
-    this.frame.rotation.copy(this.mesh.rotation);
-    this.frame.renderOrder = 100002;
-    scene.add(this.frame);
+    // Draw the rim into the same canvas. Two almost coplanar, depth-writing
+    // transparent panels can occlude each other differently in the two eyes.
     // Cache only real opaque workpiece meshes, excluding shader-generated
     // beads/guides. Do not raycast the whole workshop every pointer frame.
     this.blockers = [];
@@ -53,7 +52,6 @@ export class StatsBoard {
     // Basic-mode bench repositioning must preserve the board's rear clearance.
     if (options.follow) {
       options.follow.attach(this.mesh);
-      options.follow.attach(this.frame);
     }
     this.refresh();
   }
@@ -64,6 +62,7 @@ export class StatsBoard {
     if (this.sampleTimer < 1 / 6) return;
     this.sampleTimer = 0;
     if (!m?.welding) return;
+    this.traceRevision++;
     const values = { arc: m.height * 1000, speed: (m.strokeSpeed ?? m.speed ?? 0) * 1000,
       work: m.workAngleDeg - (m.target?.workAngle ?? 0),
       travel: m.travelAngleDeg - (m.target?.travelAngle ?? this.session?.idealTravelAngleDeg ?? 0) };
@@ -74,16 +73,32 @@ export class StatsBoard {
   }
   update(dt) {
     this.redrawTimer += dt;
-    if (this.redrawTimer >= 1 / 6 || this.hovered !== this.lastHovered) {
-      this.redrawTimer = 0; this.lastHovered = this.hovered; this.refresh();
+    if (this.redrawTimer >= 1 / 6 || (this.hovered !== this.lastHovered && this.redrawTimer >= 1 / 20)) {
+      this.redrawTimer = 0; this.lastHovered = this.hovered; this.refresh(false);
     }
   }
-  refresh() { this._draw(); this.texture.needsUpdate = true; }
-  setVisible(visible) { this.mesh.visible = this.frame.visible = visible; }
+  refresh(force = true) {
+    const settings = this.getSettings(), m = this.live;
+    const fixed = value => Number(value ?? 0).toFixed(1);
+    const progress = this.exercise === 'pipe' ? this.session?.stats?.maxP : this.session?.maxT;
+    const live = this.settingsOpen || this.result || settings.demo ? null : [
+      m?.welding, Math.round((progress ?? 0) * 100), this.session?.plan?.current?.label,
+      fixed((m?.height ?? 0) * 1000), fixed((m?.strokeSpeed ?? m?.speed ?? 0) * 1000),
+      fixed((m?.workAngleDeg ?? 0) - (m?.target?.workAngle ?? 0)), m?.target,
+      m?.physics && ['runoff', 'penetration', 'fusionRisk', 'slagRisk'].map(key => Math.round(m.physics[key] * 100)),
+    ];
+    const key = JSON.stringify([this.exercise, this.settingsOpen, this.hovered, settings,
+      this.demoStage, this.traceRevision, live]);
+    if (!force && key === this.drawKey) return;
+    this.drawKey = key;
+    this._draw(settings); this.texture.needsUpdate = true;
+  }
+  setVisible(visible) { this.mesh.visible = visible; }
   showResult(report) { this.result = report; this.refresh(); }
   reset() {
     this.result = this.live = null;
     this.sampleTimer = 0;
+    this.traceRevision++;
     for (const values of Object.values(this.traces)) values.length = 0;
     this.refresh();
   }
@@ -91,11 +106,8 @@ export class StatsBoard {
     // Once deliberately placed, the board stays in the room even if the bench moves.
     if (this.mesh.parent !== this.scene) {
       this.scene.attach(this.mesh);
-      this.scene.attach(this.frame);
     }
-    this.moveDelta.subVectors(worldPosition, this.mesh.position);
     this.mesh.position.copy(worldPosition);
-    this.frame.position.add(this.moveDelta);
   }
   hit(raycaster, includeSurface = false) {
     if (!raycaster || !this.mesh.visible) return null;
@@ -137,19 +149,24 @@ export class StatsBoard {
     ctx.lineWidth = 2; ctx.strokeRect(x, y, w, h);
     this._text(text, x + 18, y + h / 2 + 9, 26, enabled ? INK : '#738197');
   }
-  _draw() {
-    const ctx = this.ctx, settings = this.getSettings();
+  _draw(settings) {
+    const ctx = this.ctx;
     this.buttons = [];
-    ctx.fillStyle = '#101822'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#424a58'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#101822'; ctx.fillRect(5, 5, W - 10, H - 10);
     const applied = settings.mode === 'applied';
     this._button('basic', '기초연습', 28, 20, 190, 52, true, !applied);
     this._button('applied', '응용연습 · 현장', 234, 20, 280, 52, true, applied);
-    this._text(applied ? settings.jointLabel ?? '작은 배관 접합' : this.exercise === 'pipe' ? '파이프 원주 필릿' : '평판 맞대기', 540, 55, 27);
+    if (!applied && settings.selectStation) {
+      this._button('plate', '직선 용접', 536, 20, 220, 52, true, this.exercise === 'plate');
+      this._button('pipe', '파이프 용접', 768, 20, 228, 52, true, this.exercise === 'pipe');
+    } else this._text(applied ? settings.jointLabel ?? '작은 배관 접합' : this.exercise === 'pipe' ? '파이프 원주 필릿' : '직선 용접 · 평판', 540, 55, 27);
     if (this.settingsOpen) this._settings(settings);
     else if (settings.demo) {
       this._text('명장 시연 · 고스트만 재생 중', 58, 168, 36, GREEN);
       this._text('실제 운봉과 연습 기록은 멈춰 있습니다.', 58, 235, 28);
       this._text('설정 또는 G / 왼손 Y로 시연을 종료하세요.', 58, 292, 26, DIM);
+      if (this.demoStage) this._text(this.demoStage, 58, 365, 26, GREEN);
     } else if (this.result) this._result();
     else this._live();
     this._text(settings.inputStatus ?? '', 28, 651, 19, DIM);
@@ -177,20 +194,23 @@ export class StatsBoard {
     this._button('reset', '현재 연습 다시 시작', 520, 301, 460, 62);
     if (!s.supportsDemo) this._text('명장 시연은 파이프 연습에서 제공됩니다.', 42, 455, 21, DIM);
     if (s.selectStation) {
-      this._button('plate', '평판 연습', 42, 379, 450, 62, true, this.exercise === 'plate');
-      this._button('pipe', '파이프 연습', 520, 379, 460, 62, true, this.exercise === 'pipe');
+      this._text('상단의 직선 용접 / 파이프 용접으로 과제를 전환하세요.', 42, 415, 25, DIM);
     }
     if (s.mode === 'applied') {
       this._button('positioner-home', '포지셔너 원위치', 42, 379, 450, 62);
       this._button('next-joint', '다음 용접부 선택', 520, 379, 460, 62, s.hasNextJoint);
       this._text(s.positioner ?? '', 42, 459, 21, '#ffd773');
-    } else {
+    } else if (!s.technique) {
       this._text('모드를 이동하면 VR에 다시 입장하세요.', 520, 455, 21, DIM);
     }
-    this._text('오른손: 용접 · 왼손: 메뉴 / 그립으로 작업물 조절', 42, 487, 24, DIM);
+    if (s.technique) {
+      this._button('plate-angle', `철판 기준 ${s.technique.plateAngle}° · 변경`, 42, 445, 450, 46);
+      this._button('plate-offset', `철판 쪽 ${(s.technique.plateOffset * 1000).toFixed(0)} mm · 변경`, 520, 445, 460, 46);
+    } else this._text('오른손: 용접 · 왼손: 메뉴 / 그립으로 작업물 조절', 42, 487, 24, DIM);
     const input = s.inputState;
     if (input) {
-      this._text(input.summary, 42, 523, 23, input.rightTracked && input.leftTracked ? GREEN : '#ffd773');
+      this._text(s.technique ? '각도·겨냥 거리 변경 시 현재 연습이 초기화됩니다.' : input.summary,
+        42, 523, 23, s.technique ? DIM : input.rightTracked && input.leftTracked ? GREEN : '#ffd773');
       const right = input.rightTracked ? '위치 수신' : input.rightSource ? '위치 없음' : '입력 없음';
       const left = input.leftTracked ? '위치 수신' : input.leftSource ? '추적 대기' : '연결 대기';
       this._text('오른손 컨트롤러: ' + right + ' / 왼손 컨트롤러: ' + left,
@@ -202,17 +222,26 @@ export class StatsBoard {
   _live() {
     const m = this.live, pipe = this.exercise === 'pipe';
     const progress = pipe ? this.session?.stats?.maxP ?? 0 : this.session?.maxT ?? 0;
-    this._text((m?.welding ? '용접 중' : '연습 대기') + '  ·  진행 ' + Math.round(progress * 100) + '%',
-      36, 114, 25, m?.welding ? GREEN : DIM);
+    const stage = this.session?.plan?.sequential ? this.session.plan.current?.label : null;
+    this._text((stage ?? (m?.welding ? '용접 중' : '연습 대기')) + '  ·  진행 ' + Math.round(progress * 100) + '%',
+      36, 114, stage ? 22 : 25, m?.welding ? GREEN : DIM);
     const target = m?.target ?? { standoff: this.session?.idealStandoff, speed: this.session?.idealSpeed };
     this._chart(144, '아크 길이', (m?.height ?? 0) * 1000, target.standoff * 1000,
       (this.session?.standoffTol ?? 0.0024) * 1000, pipe ? 8 : 24, [{ key: 'arc', color: INK }], 'mm');
     this._chart(302, '운봉 속도', (m?.strokeSpeed ?? m?.speed ?? 0) * 1000, target.speed * 1000,
       (this.session?.speedTol ?? this.session?.speedRange ?? 0.0018) * 1000,
       pipe ? 8 : 24, [{ key: 'speed', color: '#ffd773' }], 'mm/s');
-    this._chart(460, '각도 오차 · 주황 작업각 / 초록 전진각', m?.workAngleDeg ?? 0, 0,
+    const angleTitle = this.session?.plan?.technique
+      ? `철판 기준 ${this.session.plan.technique.plateAngle}° · 주황 작업각 오차 / 초록 전진각`
+      : '각도 오차 · 주황 작업각 / 초록 전진각';
+    this._chart(460, angleTitle, (m?.workAngleDeg ?? 0) - (m?.target?.workAngle ?? 0), 0,
       this.session?.angleTol ?? 22, 55,
       [{ key: 'work', color: '#ffae78' }, { key: 'travel', color: GREEN }], '°', -55);
+    if (m?.physics) {
+      const p = m.physics, n = value => Math.round(value * 100);
+      this._text(`모델 지표 · 흘러내림 ${n(p.runoff)} · 용입 ${n(p.penetration)} · 융합불량 ${n(p.fusionRisk)} · 슬래그 ${n(p.slagRisk)}`,
+        36, 624, 20, '#ffd773');
+    }
   }
   _chart(y, title, value, target, tolerance, max, lines, unit, min = 0) {
     const ctx = this.ctx, x = 90, width = 890, top = y + 36, height = 105;
@@ -244,19 +273,23 @@ export class StatsBoard {
       ['작업각', r.work], ['이음부 겹침', r.tieIn], ['진행 방향', r.direction], ['비드 적층률', r.coverage]]
       .filter(([, value]) => Number.isFinite(value));
     rows.forEach(([label, value], i) => {
-      const y = 190 + i * 54;
+      const y = (r.physics ? 175 : 190) + i * (r.physics ? 46 : 54);
       this._text(label, 48, y + 22, 25, DIM);
       this.ctx.fillStyle = '#273545'; this.ctx.fillRect(290, y, 540, 26);
       this.ctx.fillStyle = value >= 80 ? GREEN : '#ffd773';
       this.ctx.fillRect(290, y, 540 * THREE.MathUtils.clamp(value, 0, 100) / 100, 26);
       this._text(value + '%', 862, y + 24, 25);
     });
-    this._text('아크 시간 ' + (r.arcTime ?? 0).toFixed(1) + '초 · 설정에서 다시 시작', 48, 602, 23, DIM);
+    if (r.physics) {
+      const p = r.physics;
+      this._text(`모델 지표(0~100) · 용입 ${p.penetration} · 흘러내림 ${p.runoff}`, 48, 535, 23, '#ffd773');
+      this._text(`융합불량 ${p.fusionRisk} · 슬래그 ${p.slagRisk} · 실제 결함 판정 아님`, 48, 568, 23, DIM);
+    }
+    this._text((r.finishMoves !== undefined ? `마무리 편도 ${r.finishMoves}/4 · ` : '') +
+      '아크 시간 ' + (r.arcTime ?? 0).toFixed(1) + '초 · 설정에서 다시 시작', 48, 602, 23, DIM);
   }
   dispose() {
-    for (const mesh of [this.mesh, this.frame]) {
-      mesh.removeFromParent(); mesh.geometry.dispose(); mesh.material.dispose();
-    }
+    this.mesh.removeFromParent(); this.mesh.geometry.dispose(); this.mesh.material.dispose();
     this.texture.dispose();
   }
 }

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { GravityWeldModel } from './GravityWeldModel.js';
 
 const _fwd = new THREE.Vector3();
 const _coords = { t: 0, lateral: 0, height: 0 };
@@ -36,11 +37,13 @@ export class JointSession {
     this.speedTol = options.speedTol ?? 0.0012; // m/s either side of target
 
     this.strikeRadius = options.strikeRadius ?? 0.02; // how close counts as striking on target
+    this.gravityModel = seam.plateAim && options.workpiece ? new GravityWeldModel(options.workpiece) : null;
     this.reset();
   }
 
   reset() {
     this.plan.reset();
+    this.gravityModel?.reset();
     this.speed = 0;
     this.lastT = null;
     this.arcTime = 0;
@@ -56,6 +59,8 @@ export class JointSession {
       struckAt: null,
       brokeAt: null,
       done: false,
+      routeP: 0,
+      routeStarted: false,
     }));
   }
 
@@ -122,7 +127,8 @@ export class JointSession {
       p < 1 + trail + 0.04 &&
       c.height > -0.001 &&
       c.height < target.standoff + this.standoffTol * 4 &&
-      Math.abs(c.lateral) < this.lateralTol * 3;
+      Math.abs(c.lateral - idealLateral) < this.lateralTol * 3 &&
+      (!this.seam.plateAim || c.lateral <= 0.0002);
 
     const severity = THREE.MathUtils.clamp(
       Math.max(
@@ -135,9 +141,14 @@ export class JointSession {
       0,
       1.6
     );
-    const quality = THREE.MathUtils.clamp(1 - severity, 0, 1);
+    let quality = THREE.MathUtils.clamp(1 - severity, 0, 1);
 
     const welding = arcOn && onStroke;
+    const physics = this.gravityModel?.sample(dt, frame, {
+      stroke, welding, speedRatio: target.speed > 0 ? strokeSpeed / target.speed : 0,
+      arcErr, center, workError: workErr, lateral: c.lateral,
+    });
+    if (physics) quality *= 1 - 0.45 * physics.fusionRisk;
     const st = this.strokeStats[this.plan.index];
 
     if (welding) {
@@ -153,15 +164,30 @@ export class JointSession {
       // of the run was.
       if (Math.abs(workErr) <= 1) st.good.work += dt;
       if (strokeSpeed < -0.0005) st.backwards += dt;
-      st.maxP = Math.max(st.maxP, Math.min(p, 1));
+      if (this.plan.sequential) {
+        // Only extend the welded frontier from a nearby arc-on sample.
+        // Jumping to an endpoint or moving there with the arc off cannot
+        // complete a stage, nor count a finishing move.
+        const length = stroke.span * this.seam.length;
+        const startTolerance = Math.min(0.08, 0.003 / length);
+        const stepTolerance = Math.min(0.08, 0.004 / length);
+        if (!st.routeStarted && Math.abs(p) <= startTolerance) st.routeStarted = true;
+        if (st.routeStarted && p >= -startTolerance && p <= st.routeP + stepTolerance) {
+          st.routeP = Math.max(st.routeP, Math.min(p, 1));
+        }
+        st.maxP = st.routeP;
+      } else st.maxP = Math.max(st.maxP, Math.min(p, 1));
       st.minP = Math.min(st.minP, Math.max(p, 0));
-      if (st.maxP >= 0.97) {
+      const finishP = this.plan.sequential
+        ? 1 - Math.min(0.02, 0.001 / (stroke.span * this.seam.length)) : 0.97;
+      if (st.maxP >= finishP) {
         st.brokeAt = p;
         st.done = true;
+        if (this.plan.sequential) st.maxP = 1;
       }
-    } else if (st.done && !arcOn) {
-      // The arc has to actually be broken before the next stroke begins,
-      // otherwise one continuous lap would quietly satisfy both strokes.
+    }
+    if (st.done && (!arcOn || (stroke.requireArcBreak === false && welding))) {
+      // Arc breaks separate passes; authored direction changes stay arc-on.
       this.plan.advance();
       this.speed = 0;
       this.lastT = null;
@@ -191,6 +217,7 @@ export class JointSession {
       quality,
       onSeam: onStroke,
       welding,
+      physics,
     };
   }
 
@@ -234,12 +261,16 @@ export class JointSession {
       const pct = (v) => (st.arcTime > 0 ? Math.round((v / st.arcTime) * 100) : 0);
       const s = this.plan.strokes[i];
       const lead = s.leadP(this.seam.length);
-      const tieIn =
+      let tieIn =
         st.struckAt === null
           ? 0
           : lead > 1e-6
             ? Math.round(THREE.MathUtils.clamp(1 - Math.abs(st.struckAt + lead) / (lead * 2), 0, 1) * 100)
             : Math.round(THREE.MathUtils.clamp(1 - Math.abs(st.struckAt) / 0.05, 0, 1) * 100);
+      if (this.plan.sequential && s.overlapRanges?.length) {
+        tieIn = Math.round(100 * s.overlapRanges.reduce((sum, [from, to]) =>
+          sum + THREE.MathUtils.clamp((st.maxP - from) / (to - from), 0, 1), 0) / s.overlapRanges.length);
+      }
       const direction = st.arcTime > 0 ? Math.round((1 - st.backwards / st.arcTime) * 100) : 0;
       return {
         id: st.id,
@@ -263,12 +294,19 @@ export class JointSession {
     const center = mean('center');
     const speed = mean('speed');
     const work = mean('work');
-    const tieIn = mean('tieIn');
+    const overlapStages = this.plan.sequential
+      ? strokes.filter((_, i) => this.plan.strokes[i].overlapRanges?.length) : [];
+    const tieIn = overlapStages.length
+      ? Math.round(overlapStages.reduce((sum, s) => sum + s.tieIn, 0) / overlapStages.length)
+      : mean('tieIn');
     const direction = mean('direction');
     const coverage = Math.round((beadStats?.coverage ?? 0) * 100);
 
     return {
       strokes,
+      physics: this.gravityModel?.report(),
+      finishMoves: this.plan.sequential
+        ? this.plan.strokes.filter((s, i) => s.finishMove && this.strokeStats[i].done).length : undefined,
       arc,
       center,
       speed,

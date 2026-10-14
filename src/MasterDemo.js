@@ -61,7 +61,15 @@ export class MasterDemo {
       const target = stroke.sample(THREE.MathUtils.clamp(this.p, 0, 1));
       this.p += target.speed * dt / (stroke.span * this.seam.length);
       const end = 1 + stroke.trailP(this.seam.length);
-      if (this.p >= end) { this.p = end; this.pause = 0.7; }
+      if (this.p >= end) {
+        this.p = end;
+        // A direction change is continuous; only authored arc breaks pause.
+        if (stroke.requireArcBreak === false) {
+          this.index = (this.index + 1) % this.plan.strokes.length;
+          stroke = this.plan.strokes[this.index];
+          this.p = -stroke.leadP(this.seam.length);
+        } else this.pause = 0.7;
+      }
     }
     const sample = p => ({
       t: stroke.tAt(p),

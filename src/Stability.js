@@ -32,10 +32,15 @@ export class WorkpieceGrab {
     this.offset = target.position.clone().sub(this.start);
     this.position = new THREE.Vector3();
     this.armed = false;
+    this.previous = this.start.clone();
   }
   update(dt) {
     if (!this.controller.userData.tracked || !this.controller.userData.physicalGripDown) return false;
     this.controller.getWorldPosition(this.position);
+    // Tracking relocalization is not a deliberate move. Drop this grab and
+    // require a fresh grip instead of dragging the entire bench with it.
+    if (this.position.distanceToSquared(this.previous) > 0.12 ** 2) return false;
+    this.previous.copy(this.position);
     if (!this.armed) {
       if (this.position.distanceToSquared(this.start) < 0.006 ** 2) return true;
       this.armed = true;

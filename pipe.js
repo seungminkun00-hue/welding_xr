@@ -11,7 +11,7 @@ import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { pipeFilletSeam } from './src/SeamCurve.js';
-import { pipeFilletPlan } from './src/PassPlan.js';
+import { basicDownhillPlan } from './src/PassPlan.js';
 import { buildStickHolder, poseTorchByTip } from './src/Torches.js';
 import { CurvedGuide } from './src/CurvedGuide.js';
 import { JointSession } from './src/JointSession.js';
@@ -202,8 +202,9 @@ const exercises = jointDefinitions.map(definition => {
   const seam = definition ? createFieldSeam(definition) : pipeFilletSeam({
     center: new THREE.Vector3(), wallNormal: new THREE.Vector3(0, 0, 1),
     up: new THREE.Vector3(0, 1, 0), radius: SEAM_RADIUS,
+    plateAim: true,
   });
-  const plan = APPLIED ? smallJointPlan(seam) : pipeFilletPlan(seam);
+  const plan = APPLIED ? smallJointPlan(seam) : basicDownhillPlan(seam);
   const guide = new CurvedGuide(workpiece, seam, plan, {
     segments: APPLIED ? 64 : 160,
     zoneHalfWidth: APPLIED ? 0.0022 : 0.0055, ringRadius: APPLIED ? 0.0024 : 0.006,
@@ -211,10 +212,12 @@ const exercises = jointDefinitions.map(definition => {
   const bead = new WeldBead(workpiece, seam, {
     ...weldBeadOptions({ scale: APPLIED ? 0.32 : 0.68, segments: APPLIED ? 192 : 320 }),
     arcLight: fieldArcLight, sparkCount: APPLIED ? 80 : 160,
+    gravity: !APPLIED,
   });
   const session = new JointSession(seam, plan, {
     standoffTol: APPLIED ? 0.0012 : 0.0024, lateralTol: APPLIED ? 0.0015 : 0.0035,
     angleTol: 22, speedTol: APPLIED ? 0.0012 : 0.0018,
+    workpiece,
   });
   const poseGuide = new PoseGuide(workpiece, seam);
   if (APPLIED) { poseGuide.ring.scale.setScalar(0.4); poseGuide.travel.setLength(0.015, 0.004, 0.002); }
@@ -352,10 +355,10 @@ function updateDrag(dt) {
 // ---------------------------------------------------------------------------
 const desktop = {
   p: 0,
-  lateral: 0,
+  lateral: plan.current.lateralAt(0, seam.length),
   height: APPLIED ? 0.002 : 0.0028,
-  travelAngle: APPLIED ? -8 : -10,
-  workAngle: 0,
+  travelAngle: plan.current.sample(0).travelAngle,
+  workAngle: plan.current.sample(0).workAngle,
 };
 const desktopTorch = buildTorchMesh();
 for (const exercise of exercises) exercise.poseGuide.useTorch(desktopTorch);
@@ -373,6 +376,12 @@ const trainingUI = new TrainingUI({
   mode: APPLIED ? 'applied' : 'basic', positioner, resetPositioner,
   getJointLabel: () => exercises[jointIndex].definition?.label,
   nextJoint: APPLIED ? () => selectJoint(jointIndex + 1) : null,
+  getTechnique: () => plan.technique,
+  setTechnique: value => {
+    plan.setTechnique?.(value);
+    guide.refreshPaths();
+    resetJoint();
+  },
 });
 
 function toggleDemo() {
@@ -502,9 +511,13 @@ function activeStroke() {
  * The base direction is the joint frame's own normal reversed -- straight into
  * the corner, bisecting both members. On this joint that IS the 45 degree work
  * angle, so workAngle here is the error off 45, not the angle itself, and it
- * stays zero the whole way round a correct weld.
+ * stays zero the whole way round a correct weld in applied mode. Basic
+ * plateAim instead uses the plate normal and its configurable work angle.
  */
 function rodForward(frame, travelAngleDeg, workAngleDeg, target) {
+  if (seam.plateAim) return target.copy(frame.normal).negate()
+    .addScaledVector(frame.travel, Math.tan(THREE.MathUtils.degToRad(travelAngleDeg)))
+    .addScaledVector(frame.lateral, Math.tan(THREE.MathUtils.degToRad(workAngleDeg))).normalize();
   return target
     .copy(frame.normal)
     .negate()
@@ -603,10 +616,10 @@ function resetJoint() {
   bead.reset();
   board.reset();
   desktop.p = strokeStartP(activeStroke());
-  desktop.lateral = 0;
+  desktop.lateral = activeStroke().lateralAt(0, seam.length);
   desktop.height = APPLIED ? 0.002 : 0.0028;
-  desktop.travelAngle = APPLIED ? -8 : -10;
-  desktop.workAngle = 0;
+  desktop.travelAngle = activeStroke().sample(0).travelAngle;
+  desktop.workAngle = activeStroke().sample(0).workAngle;
   lastStrokeIndex = 0;
   result.style.display = 'none';
 }
@@ -619,13 +632,14 @@ function showResult() {
       (s) =>
         `<div class="bar"><span>${s.label}</span><b>${s.coverage}%</b></div>
          <p class="hint">아크길이 ${s.arc}% · 중앙 ${s.center}% · 속도 ${s.speed}% ·
-         작업각(45°) ${s.work}% · 이음부 ${s.tieIn}% · 진행방향 ${s.direction}%</p>`
+         작업각 ${s.work}% · 이음부 ${s.tieIn}% · 진행방향 ${s.direction}%</p>`
     )
     .join('');
   result.innerHTML = `
     <h2>용접 결과 · ${r.total}점</h2>
     ${rows}
     <div class="bar"><span>비드 적층률</span><b>${r.coverage}%</b></div>
+    ${r.physics ? `<p class="hint">모델 지표(0~100): 용입 ${r.physics.penetration} · 흘러내림 ${r.physics.runoff} · 융합불량 ${r.physics.fusionRisk} · 슬래그 ${r.physics.slagRisk} — 실제 결함 판정 아님</p>` : ''}
     <p class="hint">아크 시간 ${r.arcTime.toFixed(1)}초 · R 키로 다시 시도 · G 키로 명장 궤적 재생</p>`;
   result.style.display = 'block';
 }
@@ -677,6 +691,7 @@ function animate(time, xrFrame) {
     && !rodController.userData.source.hand && rodController.userData.handedness === WELDING_HAND);
   if (demo) {
     demoPlayer.update(dt);
+    board.demoStage = plan.sequential ? plan.strokes[demoPlayer.index].label : null;
     guide.setVisible(false);
     hud.setVisible(false);
     bead.update(dt, { arcOn: false, point: _contact, t: 0 });
@@ -704,8 +719,9 @@ function animate(time, xrFrame) {
   if (m.strokeIndex !== lastStrokeIndex) {
     lastStrokeIndex = m.strokeIndex;
     poseGuide?.reset();
-    desktop.p = strokeStartP(activeStroke());
-    desktop.lateral = 0;
+    const continuous = m.stroke?.requireArcBreak === false && plan.current;
+    desktop.p = continuous ? plan.current.progressOf(m.t) : strokeStartP();
+    if (!continuous) desktop.lateral = activeStroke().lateralAt(0, seam.length);
   }
 
   // Progress and cursor are two different things, and conflating them was the
@@ -718,6 +734,7 @@ function animate(time, xrFrame) {
     strokeIndex: m.strokeIndex,
     progressP: weldedP,
     cursorT: m.t,
+    lateral: m.lateral,
     onSeam: m.onSeam,
     arcOn: m.welding,
     // Only an arc that is actually burning can be going wrong. Feeding
@@ -734,7 +751,9 @@ function animate(time, xrFrame) {
       t: m.t,
       lateral: m.lateral,
       speedRatio: Math.abs(m.speedRatio),
+      nominalSpeed: m.target?.speed,
       quality: m.quality,
+      physics: m.physics, dir: m.stroke?.dir,
     });
   }
   bead.update(dt, { arcOn: m.welding, point: _contact, t: m.t });
@@ -779,7 +798,7 @@ function animate(time, xrFrame) {
       (m.target ? ` / 목표 ${(m.target.standoff * 1000).toFixed(1)}mm` : '') +
       `  ·  속도 ${(m.strokeSpeed * 1000).toFixed(1)}mm/s` +
       (m.target ? ` / 목표 ${(m.target.speed * 1000).toFixed(1)}mm/s` : '') +
-      `  ·  작업각오차 ${m.workAngleDeg.toFixed(0)}°` +
+      `  ·  작업각오차 ${(m.workAngleDeg - (m.target?.workAngle ?? 0)).toFixed(0)}°` +
       (demo ? '  ·  [명장 궤적 재생 중]' : '');
     if (positioner) document.getElementById('positioner-readout').textContent = positioner.readout;
   }

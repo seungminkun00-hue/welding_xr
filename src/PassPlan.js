@@ -121,7 +121,8 @@ export class Stroke {
    */
   lateralAt(p, seamLength) {
     const w = this.profile.weave;
-    if (!w || w.pattern === 'none') return 0;
+    const offset = this.profile.lateralOffset ?? 0;
+    if (!w || w.pattern === 'none') return offset;
     const amp = track(w.amp, p);
     const pitch = Math.max(track(w.pitch, p), 1e-4);
     const phase = ((p * this.span * seamLength) / pitch) % 1;
@@ -173,6 +174,56 @@ export class PassPlan {
   reset() {
     this.index = 0;
   }
+}
+
+/** Basic exercise authored from the user's downhill reference, not a WPS.
+ * Stages split continuous direction changes without requiring an arc break.
+ * Clock t increases clockwise when looking at the pipe from the front.
+ */
+export function basicDownhillPlan(seam, { topOverlap = 0.006 } = {}) {
+  const FIVE = 5 / 12, SIX = 0.5;
+  const overlap = Math.min(topOverlap / seam.length, 1 / 24);
+  const topEnd = wrap01(-overlap);
+  const profile = {
+    speed: [[0, 0.003], [1, 0.003]],
+    standoff: [[0, 0.0028], [1, 0.0028]],
+    travelAngle: [[0, 0], [1, 0]],
+    workAngle: [[0, 0], [1, 0]],
+    weave: { pattern: 'none' },
+  };
+  const stage = (id, label, from, to, dir, extra = {}) => Object.assign(
+    new Stroke({ id, label, from, to, dir, closed: true, profile }),
+    { requireArcBreak: false, colorPath: 0xf04444, ...extra }
+  );
+  const strokes = [
+    stage('down-left', '1차 · 12→5시 반시계 · 끝에서 아크 끊기', 0, FIVE, -1,
+      { requireArcBreak: true, colorPath: 0x1766ff }),
+    stage('top-overlap', '2차 · 1→12시 반시계 · 위쪽 오버랩', 1 / 12, topEnd, -1),
+    stage('down-right', '2차 · 시계 방향 전환 → 6시', topEnd, SIX, 1),
+    stage('bottom-overlap', '아래쪽 오버랩 · 6→5시 반시계', SIX, FIVE, -1,
+      { overlapRanges: [[0, 1]] }),
+  ];
+  strokes[1].overlapRanges = [[(1 / 12) / strokes[1].span, 1]];
+  for (let i = 0; i < 4; i++) {
+    const forward = i % 2 === 0;
+    strokes.push(stage(`finish-${i + 1}`,
+      `마무리 편도 ${i + 1}/4 · ${forward ? '5→6시 시계' : '6→5시 반시계'}` +
+        (i === 3 ? ' · 아크 끊기' : ''),
+      forward ? FIVE : SIX, forward ? SIX : FIVE, forward ? 1 : -1,
+      { finishMove: i + 1, requireArcBreak: i === 3 }));
+  }
+  const plan = new PassPlan(strokes, { seam });
+  plan.sequential = true;
+  plan.activeGuideOnly = true;
+  plan.technique = { plateAngle: 90, plateOffset: 0.002 };
+  plan.setTechnique = ({ plateAngle, plateOffset }) => {
+    if (Number.isFinite(plateAngle)) plan.technique.plateAngle = THREE.MathUtils.clamp(plateAngle, 45, 90);
+    if (Number.isFinite(plateOffset)) plan.technique.plateOffset = THREE.MathUtils.clamp(plateOffset, 0, 0.006);
+    profile.workAngle = [[0, 90 - plan.technique.plateAngle], [1, 90 - plan.technique.plateAngle]];
+    profile.lateralOffset = -plan.technique.plateOffset;
+  };
+  plan.setTechnique(plan.technique);
+  return plan;
 }
 
 /**

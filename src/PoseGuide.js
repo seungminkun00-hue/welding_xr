@@ -24,7 +24,7 @@ export class PoseGuide {
     this.group.add(this.ring);
     this.travel = new THREE.ArrowHelper(new THREE.Vector3(0, 0, -1), new THREE.Vector3(), 0.035, 0xffcc54, 0.009, 0.005);
     this.group.add(this.travel);
-    this.path = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0x53ffd0, transparent: true, opacity: 0.65 }));
+    this.path = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0x53ffd0, transparent: true, opacity: 0.65, depthWrite: false }));
     parent.add(this.path);
     this.points = new Float32Array(32 * 3);
     this.path.geometry.setAttribute('position', new THREE.BufferAttribute(this.points, 3));

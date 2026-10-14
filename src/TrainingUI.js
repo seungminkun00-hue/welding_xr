@@ -6,7 +6,8 @@ export class TrainingUI {
     helmet, vrControls, getDemo = () => false, toggleDemo = null,
     supportsDemo = () => false, reset, selectStation = null,
     mode = 'basic', positioner = null, resetPositioner = null,
-    getJointLabel = () => null, nextJoint = null }) {
+    getJointLabel = () => null, nextJoint = null,
+    getTechnique = () => null, setTechnique = null }) {
     Object.assign(this, { renderer, camera, board, controllers, helmet, vrControls,
       getDemo, toggleDemo, supportsDemo, reset, selectStation, physicalInput });
     this.guides = true;
@@ -35,8 +36,17 @@ export class TrainingUI {
       inputState: this.inputState,
       helmet: helmet?.enabled, hasHelmet: !!helmet, help: vrControls.helpVisible,
       demo: getDemo(), supportsDemo: supportsDemo(), selectStation: !!selectStation,
+      technique: getTechnique(),
     });
     board.onAction = async action => {
+      const technique = getTechnique();
+      if (technique && action === 'plate-angle') {
+        const angles = [90, 80, 70, 60, 45];
+        setTechnique?.({ plateAngle: angles[(angles.indexOf(technique.plateAngle) + 1) % angles.length] });
+      }
+      if (technique && action === 'plate-offset') {
+        setTechnique?.({ plateOffset: ((Math.round(technique.plateOffset * 1000) + 1) % 7) / 1000 });
+      }
       if ((action === 'applied' || action === 'basic') && action !== mode) {
         const xrSession = renderer.xr.getSession();
         if (xrSession) await xrSession.end();
@@ -154,9 +164,12 @@ export class TrainingUI {
       this.endBoardDrag(drag.controller); return;
     }
     this.raycaster.ray.at(drag.distance, this.dragPoint);
+    this.dragTarget.copy(drag.boardStart).add(this.dragPoint).sub(drag.start);
+    if (this.dragTarget.distanceToSquared(drag.last) > 0.12 ** 2) {
+      this.endBoardDrag(drag.controller, true); return;
+    }
     if (!drag.moved && this.dragPoint.distanceToSquared(drag.start) < 0.006 ** 2) return;
     drag.moved = true;
-    this.dragTarget.copy(drag.boardStart).add(this.dragPoint).sub(drag.start);
     if (this.dragTarget.distanceToSquared(drag.last) < 0.0005 ** 2) return;
     this.board.moveTo(this.dragTarget);
     drag.last.copy(this.dragTarget);

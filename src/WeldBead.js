@@ -1,13 +1,12 @@
 import * as THREE from 'three';
 
-// Five columns per ring is the minimum that gives the bead a crowned profile
-// instead of a flat ribbon.
-const SIDES = [-1, -0.5, 0, 0.5, 1];
+// A fixed surface grid retains the entire weave, including both edge dwells.
+// Moving one five-vertex crown sideways used to erase the previous stroke.
+const SIDES = Array.from({ length: 25 }, (_, i) => i / 12 - 1);
 const COLS = SIDES.length;
+const GRID_SPAN = 2.6;
 
-const RIPPLE_HZ = 7; // arc pulses per second; ripple spacing = travel speed / this
-
-// These three must match tools/blender/bake_bead_maps.py, which sculpts one
+// These tile constants must match tools/blender/bake_bead_maps.py, which sculpts one
 // tile of bead and bakes it. RIPPLES_PER_TILE is how far the phase has to run
 // to cross the texture once; BEAD_SPAN_RATIO is the bead's share of the strip,
 // the rest being the parent metal the toes wet out onto.
@@ -16,7 +15,7 @@ const BEAD_SPAN_RATIO = 4.0 / 6.0;
 const HEAT_TAU = 1.1; // seconds for the glow to fall to 1/e
 
 // One finish for every exercise; only its physical size changes with the joint.
-export function weldBeadOptions({ scale = 1, segments = 480 } = {}) {
+export function weldBeadOptions({ scale = 1, segments = 320 } = {}) {
   return { segments, halfWidth: 0.0062 * scale, height: 0.0032 * scale,
     poolLength: 0.007 * scale, tintHalfWidth: 0.0062 * 3.4 * scale };
 }
@@ -24,16 +23,16 @@ export function weldBeadOptions({ scale = 1, segments = 480 } = {}) {
 const BEAD_VERT = /* glsl */ `
   attribute vec3 aCenter;
   attribute float aSide;
-  attribute float aOffset;   // lateral drift of the bead from the seam, meters
+  attribute float aOffset;   // deposition centre for local surface detail, meters
   attribute float aFill;
   attribute float aWidth;
   attribute float aHeat;
   attribute float aQuality;
   attribute float aPhase;
+  attribute vec2 aSlope;
+  attribute float aDefect;
   attribute vec3 aLateral;
   attribute vec3 aNormal;
-  attribute vec3 aSurfacePlus;
-  attribute vec3 aSurfaceMinus;
   uniform float uHalfWidth;
   uniform float uHeight;
   uniform float uRipplesPerTile;
@@ -48,39 +47,25 @@ const BEAD_VERT = /* glsl */ `
   varying vec3 vLateralW;
   varying vec3 vTravelW;
   varying vec3 vPosW;
+  varying float vDefect;
   void main() {
+    vDefect = aDefect;
     vFill = aFill;
     vHeat = aHeat;
     vQuality = aQuality;
     vPhase = aPhase;
-    vSide = aSide;
-
-    float crown = cos(aSide * 1.5707963);
-    float wave = 0.5 + 0.5 * cos(aPhase - abs(aSide) * 3.6);
-    float ridge = pow(wave, 0.55);
-    float widthRipple = 0.93 + 0.07 * ridge;
-    float heightRipple = 0.62 + 0.38 * ridge;
-    float lump = 1.0 + (1.0 - aQuality) * 0.18 * sin(aPhase * 3.7 + aSide * 8.0);
-
-    float across = aOffset + aSide * uHalfWidth * aWidth * widthRipple;
-    vec3 surface = across >= 0.0 ? aSurfacePlus : aSurfaceMinus;
-    vec3 pos = aCenter
-      + surface * (abs(across) / uHalfWidth)
-      + aNormal * (uHeight * aFill * crown * heightRipple * lump + 0.0004);
-
-    // The baked tile carries the whole shape, so the shading frame here is the
-    // flat plate the tile was baked against -- not the crowned profile, which
-    // is already in the map and would otherwise be counted twice.
-    // Rigid positioner rotation must also rotate the metal's shading frame.
-    vNormalW = normalize(mat3(modelMatrix) * aNormal);
+    vSide = clamp((aSide - aOffset / uHalfWidth) / max(aWidth, 0.1), -1.5, 1.5);
+    vec3 travel = normalize(cross(aNormal, aLateral));
+    vec3 pos = aCenter + aNormal * (uHeight * aFill + 0.00025);
+    // Central differences of deposited height give a smooth, actual crown.
+    vec3 normal = normalize(aNormal - aLateral * aSlope.x - travel * aSlope.y);
+    vNormalW = normalize(mat3(modelMatrix) * normal);
     vLateralW = normalize(mat3(modelMatrix) * aLateral);
     vTravelW = normalize(cross(vNormalW, vLateralW));
 
-    // Phase, not distance, drives the texture along travel. That is what keeps
-    // the ripple spacing tied to how fast the trainee is moving: the arc pulses
-    // at a fixed rate, so running faster stretches the dimes out.
+    // Phase is frozen into the metal from the measured two-dimensional path.
     vBeadUv = vec2(
-      0.5 + aSide * 0.5 * uSpanRatio,
+      0.5 + clamp(vSide, -1.0, 1.0) * 0.5 * uSpanRatio,
       aPhase / (6.2831853 * uRipplesPerTile)
     );
 
@@ -109,6 +94,7 @@ const BEAD_FRAG = /* glsl */ `
   varying vec3 vLateralW;
   varying vec3 vTravelW;
   varying vec3 vPosW;
+  varying float vDefect;
 
   // Oxide-film interference, the colours a weld cools through.
   vec3 tempTint(float t) {
@@ -125,24 +111,16 @@ const BEAD_FRAG = /* glsl */ `
   void main() {
     if (vFill < 0.02) discard;
 
-    // Sculpted tile when it has loaded, analytic crescent until then, so a
-    // missing asset degrades to the old look instead of to a black bead.
-    vec3 n;
-    float ao;
-    float ripple;
+    // The mesh supplies the crown and weave. Maps only add fine surface marks;
+    // they no longer impose an identical row of large dimes on every weld.
+    float detail = 1.0 - smoothstep(0.6, 2.5, fwidth(vPhase));
+    float ripple = 0.5 + 0.5 * cos(vPhase) * detail;
+    vec3 n = normalize(vNormalW + vTravelW * sin(vPhase) * 0.13 * detail);
+    float ao = 0.86 + 0.14 * ripple;
     if (uHasMaps > 0.5) {
       vec3 nt = texture2D(uBeadNormal, vBeadUv).xyz * 2.0 - 1.0;
-      n = normalize(vLateralW * nt.x + vTravelW * nt.y + vNormalW * nt.z);
-      ao = texture2D(uBeadAO, vBeadUv).r;
-      // Reading the ripple back off the baked slope keeps the colour banding
-      // locked to the geometry instead of drifting against it.
-      ripple = clamp(0.5 + nt.y * 1.4, 0.0, 1.0);
-    } else {
-      float wave = 0.5 + 0.5 * cos(vPhase - abs(vSide) * 3.6);
-      ripple = pow(wave, 0.38);
-      float slope = 0.85 * sin(vPhase - abs(vSide) * 3.6);
-      n = normalize(vNormalW * (1.0 - abs(vSide) * 0.55) + vLateralW * (vSide * 0.85) + vTravelW * slope);
-      ao = 0.72 + 0.28 * ripple;
+      n = normalize(n + (vLateralW * nt.x + vTravelW * nt.y) * 0.12 * detail);
+      ao *= mix(1.0, texture2D(uBeadAO, vBeadUv).r, 0.18 * detail);
     }
 
     vec3 view = normalize(cameraPosition - vPosW);
@@ -153,14 +131,18 @@ const BEAD_FRAG = /* glsl */ `
     vec3 env = mix(vec3(0.09, 0.10, 0.12), vec3(0.58, 0.64, 0.73), sky * sky);
 
     vec3 base = mix(uBadColor, uGoodColor, clamp(vQuality, 0.0, 1.0));
-    base *= 0.68 + 0.32 * ripple;
+    base *= 0.88 + 0.12 * ripple;
+    // Irregular dark patches indicate the training model's slag/fusion risk;
+    // they are deliberately not rendered as hydrogen cracks.
+    float slagMask = smoothstep(0.40, 0.78, 0.5 + 0.5 * sin(vPhase * 0.7 + vSide * 9.0));
+    base = mix(base, vec3(0.10, 0.085, 0.065), slagMask * vDefect * 0.8);
     base = mix(base, base * tempTint(abs(vSide)) * 2.1, 0.14);
 
     vec3 col = base * (0.42 + 0.70 * lambert) + base * env * 1.55;
     col *= 0.45 + 0.55 * ao;
 
     vec3 half0 = normalize(normalize(uLightDir) + view);
-    float spec = pow(max(dot(n, half0), 0.0), 42.0);
+    float spec = pow(max(dot(n, half0), 0.0), 26.0);
     col += vec3(0.78, 0.81, 0.86) * spec * (0.45 + ripple * 0.55) * ao;
 
     col += uHotColor * pow(clamp(vHeat, 0.0, 1.0), 1.6) * 1.7;
@@ -243,6 +225,8 @@ const POOL_FRAG = /* glsl */ `
   precision mediump float;
   uniform float uTime;
   uniform float uArc;
+  uniform vec2 uGravity;
+  uniform float uRunoff;
   varying vec2 vUv;
 
   // Cheap hash so the sputter is irregular rather than a clean sine.
@@ -250,7 +234,8 @@ const POOL_FRAG = /* glsl */ `
 
   void main() {
     float r = length(vUv);
-    if (r > 1.0) discard;
+    float moltenR = length(vUv - uGravity * uRunoff * 0.35);
+    if (min(r, moltenR) > 1.0) discard;
     float d = 1.0 - clamp(r, 0.0, 1.0);
 
     // Arcs are never steady. Two beat frequencies plus a coarse sputter that
@@ -261,7 +246,7 @@ const POOL_FRAG = /* glsl */ `
     float flicker = beat * mix(1.0, sputter, 0.55);
 
     // Molten steel, wide and warm.
-    float pool = pow(d, 1.5) * 0.9;
+    float pool = pow(max(0.0, 1.0 - moltenR), 1.5) * 0.9;
     vec3 col = vec3(1.25, 0.42, 0.06) * pool;
 
     // Violet corona: the part that makes a welding photo look like welding.
@@ -305,10 +290,25 @@ export class WeldBead {
     this.time = 0;
     this.visualDetails = true;
 
-    this.segments = options.segments ?? 480;
+    this.segments = options.segments ?? 320;
     this.halfWidth = options.halfWidth ?? 0.0062; // at nominal travel speed
     this.height = options.height ?? 0.0032;
     this.poolLength = options.poolLength ?? 0.007; // meters of molten puddle
+    this.gravityEnabled = !!options.gravity;
+    this.gravity = new THREE.Vector3(0, -1, 0);
+    this.gravityRotation = new THREE.Quaternion();
+    this.poolGravity = new THREE.Vector3();
+    this.poolNormal = new THREE.Vector3();
+    this.runoff = 0;
+    this.gridHalfWidth = this.halfWidth * GRID_SPAN;
+    this.rowSpacing = seam.length / this.segments;
+    this.colSpacing = this.gridHalfWidth * 2 / (COLS - 1);
+    this.lastDeposit = null;
+    this.pathPhase = 0;
+    this.hotRows = new Set();
+    this.changedRows = new Set();
+    this.normalRows = new Set();
+    this.flowCells = new Set();
 
     const count = (this.segments + 1) * COLS;
     this.count = count;
@@ -318,9 +318,8 @@ export class WeldBead {
     // every ring of the bead is extruded along a different pair of axes.
     const aLateral = new Float32Array(count * 3);
     const aNormal = new Float32Array(count * 3);
-    const aSurfacePlus = new Float32Array(count * 3);
-    const aSurfaceMinus = new Float32Array(count * 3);
     const plus = new THREE.Vector3(), minus = new THREE.Vector3();
+    const surface = new THREE.Vector3(), lateral = new THREE.Vector3(), normal = new THREE.Vector3();
     const aSide = new Float32Array(count);
     this.aOffset = new Float32Array(count);
     this.aFill = new Float32Array(count);
@@ -328,33 +327,33 @@ export class WeldBead {
     this.aHeat = new Float32Array(count);
     this.aQuality = new Float32Array(count);
     this.aPhase = new Float32Array(count);
+    this.aSlope = new Float32Array(count * 2);
+    this.aDefect = new Float32Array(count);
+    this.flowFields = ['Fill', 'Heat', 'Quality', 'Phase', 'Offset', 'Width', 'Defect'];
+    this.flow = Object.fromEntries(this.flowFields.map(key => [key, new Float32Array(count)]));
 
     const indices = [];
     for (let i = 0; i <= this.segments; i++) {
       const t = i / this.segments;
       seam.pointAt(t, _pt);
       const frame = seam.frameAt(t, _frame);
-      if (seam.surfacePoint) {
-        seam.surfacePoint(t, this.halfWidth, plus).sub(_pt);
-        seam.surfacePoint(t, -this.halfWidth, minus).sub(_pt);
-      } else {
-        plus.copy(frame.lateral).multiplyScalar(this.halfWidth);
-        minus.copy(frame.lateral).multiplyScalar(-this.halfWidth);
-      }
       for (let c = 0; c < COLS; c++) {
         const v = i * COLS + c;
-        aCenter[v * 3] = _pt.x;
-        aCenter[v * 3 + 1] = _pt.y;
-        aCenter[v * 3 + 2] = _pt.z;
-        aLateral[v * 3] = frame.lateral.x;
-        aLateral[v * 3 + 1] = frame.lateral.y;
-        aLateral[v * 3 + 2] = frame.lateral.z;
-        aNormal[v * 3] = frame.normal.x;
-        aNormal[v * 3 + 1] = frame.normal.y;
-        aNormal[v * 3 + 2] = frame.normal.z;
-        aSide[v] = SIDES[c];
-        plus.toArray(aSurfacePlus, v * 3);
-        minus.toArray(aSurfaceMinus, v * 3);
+        const across = SIDES[c] * this.gridHalfWidth;
+        if (seam.surfacePoint) {
+          seam.surfacePoint(t, across, surface);
+          seam.surfacePoint(t, across + 0.0001, plus);
+          seam.surfacePoint(t, across - 0.0001, minus);
+          lateral.subVectors(plus, minus).normalize();
+          normal.crossVectors(lateral, frame.travel).normalize();
+        } else {
+          surface.copy(_pt).addScaledVector(frame.lateral, across);
+          lateral.copy(frame.lateral); normal.copy(frame.normal);
+        }
+        surface.toArray(aCenter, v * 3);
+        lateral.toArray(aLateral, v * 3);
+        normal.toArray(aNormal, v * 3);
+        aSide[v] = SIDES[c] * GRID_SPAN;
       }
       if (i < this.segments) {
         for (let c = 0; c < COLS - 1; c++) {
@@ -372,8 +371,6 @@ export class WeldBead {
     geometry.setAttribute('aCenter', new THREE.BufferAttribute(aCenter, 3));
     geometry.setAttribute('aLateral', new THREE.BufferAttribute(aLateral, 3));
     geometry.setAttribute('aNormal', new THREE.BufferAttribute(aNormal, 3));
-    geometry.setAttribute('aSurfacePlus', new THREE.BufferAttribute(aSurfacePlus, 3));
-    geometry.setAttribute('aSurfaceMinus', new THREE.BufferAttribute(aSurfaceMinus, 3));
     geometry.setAttribute('aSide', new THREE.BufferAttribute(aSide, 1));
     this.offsetAttr = new THREE.BufferAttribute(this.aOffset, 1);
     this.fillAttr = new THREE.BufferAttribute(this.aFill, 1);
@@ -381,12 +378,21 @@ export class WeldBead {
     this.heatAttr = new THREE.BufferAttribute(this.aHeat, 1);
     this.qualityAttr = new THREE.BufferAttribute(this.aQuality, 1);
     this.phaseAttr = new THREE.BufferAttribute(this.aPhase, 1);
+    this.slopeAttr = new THREE.BufferAttribute(this.aSlope, 2);
+    this.defectAttr = new THREE.BufferAttribute(this.aDefect, 1);
+    geometry.setAttribute('aSlope', this.slopeAttr);
+    geometry.setAttribute('aDefect', this.defectAttr);
     geometry.setAttribute('aOffset', this.offsetAttr);
     geometry.setAttribute('aFill', this.fillAttr);
     geometry.setAttribute('aWidth', this.widthAttr);
     geometry.setAttribute('aHeat', this.heatAttr);
     geometry.setAttribute('aQuality', this.qualityAttr);
     geometry.setAttribute('aPhase', this.phaseAttr);
+    for (const key of this.flowFields) {
+      const attr = geometry.attributes['a' + key];
+      attr.setUsage(THREE.DynamicDrawUsage);
+    }
+    this.slopeAttr.setUsage(THREE.DynamicDrawUsage);
     geometry.setIndex(indices);
 
     const material = new THREE.ShaderMaterial({
@@ -415,7 +421,7 @@ export class WeldBead {
 
     this._buildPool(options);
     this._buildHeatTint(options);
-    this._buildSparks(options.sparkCount ?? 160);
+    this._buildSparks(options.sparkCount ?? 80);
     this.spatter = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1, 1),
       // Spatter has already cooled by the time it is sitting on the plate, so
       // it stays dull. The glowing part of the story belongs to the sparks.
@@ -442,57 +448,32 @@ export class WeldBead {
    * @param {number} m.quality    0..1, how well the torch is being handled
    */
   deposit(dt, m) {
+    if (!(dt > 0) || !Number.isFinite(m.t) || !Number.isFinite(m.lateral)) return;
+    dt = Math.min(dt, 0.05);
     this.mesh.visible = this.heatTint.visible = true;
-    // Deposition per unit length goes as 1/speed: crawl and it piles up, race
-    // and it starves.
-    const ratio = Math.max(m.speedRatio, 0.12);
-    const widthScale = THREE.MathUtils.clamp(Math.pow(1 / ratio, 0.5), 0.42, 1.85);
-    const phase = this.time * Math.PI * 2 * RIPPLE_HZ;
-
-    const halfT = this.poolLength / this.seam.length;
-    const lo = Math.floor((m.t - halfT) * this.segments);
-    const hi = Math.ceil((m.t + halfT * 0.35) * this.segments);
-    if (hi < lo) return;
-    const rows = new Set();
-    for (let i = lo; i <= hi; i++) {
-      if (this.seam.closed) {
-        const row = THREE.MathUtils.euclideanModulo(i, this.segments);
-        rows.add(row);
-        if (row === 0) rows.add(this.segments); // identical closing vertex row
-      } else if (i >= 0 && i <= this.segments) rows.add(i);
+    this.runoff = m.physics?.runoff ?? 0;
+    this.poolT = m.t;
+    const previous = this.lastDeposit;
+    let deltaT = previous ? m.t - previous.t : 0;
+    if (this.seam.closed) deltaT -= Math.round(deltaT);
+    let along = deltaT * this.seam.length;
+    let across = previous ? m.lateral - previous.lateral : 0;
+    let distance = Math.hypot(along, across);
+    // Do not connect separated arcs or a tracking teleport with a metal bridge.
+    if (distance > 0.03) { deltaT = along = across = distance = 0; }
+    const dirAlong = distance > 0.00005 ? along / distance : previous?.dirAlong ?? m.dir ?? 1;
+    const dirAcross = distance > 0.00005 ? across / distance : previous?.dirAcross ?? 0;
+    const phaseStep = distance / (this.halfWidth * 0.65) * Math.PI * 2;
+    const steps = Math.min(12, Math.max(1, Math.ceil(distance / (this.colSpacing * 0.6))));
+    const width = THREE.MathUtils.clamp(Math.pow(1 / Math.max(m.speedRatio ?? 1, 0.12), 0.22), 0.6, 1.4);
+    const feed = (m.nominalSpeed ?? 0.01) / this.poolLength * 1.3;
+    for (let step = 1; step <= steps; step++) {
+      const fraction = step / steps;
+      this._stamp(dt / steps, m.t - deltaT * (1 - fraction), m.lateral - across * (1 - fraction),
+        dirAlong, dirAcross, this.pathPhase + phaseStep * fraction, width, feed, m);
     }
-
-    const blend = 1 - Math.exp(-dt * 14);
-
-    for (const i of rows) {
-      for (let c = 0; c < COLS; c++) {
-        const v = i * COLS + c;
-        this.aFill[v] = THREE.MathUtils.lerp(this.aFill[v], 1, blend);
-        this.aWidth[v] = THREE.MathUtils.lerp(this.aWidth[v] || widthScale, widthScale, blend);
-        this.aOffset[v] = THREE.MathUtils.lerp(this.aOffset[v], m.lateral, blend);
-        this.aQuality[v] = THREE.MathUtils.lerp(
-          this.aQuality[v] || m.quality,
-          m.quality,
-          blend
-        );
-        this.aHeat[v] = 1;
-        if (this.aPhase[v] === 0) this.aPhase[v] = phase;
-      }
-    }
-
-    for (const i of rows) {
-      for (let c = 0; c < HAZ_COLS; c++) {
-        const v = i * HAZ_COLS + c;
-        this.hazFill[v] = THREE.MathUtils.lerp(this.hazFill[v], 1, blend);
-      }
-    }
-    this.hazFillAttr.needsUpdate = true;
-
-    // Deposited geometry changes here, not on every idle/cooling frame.
-    this.fillAttr.needsUpdate = this.widthAttr.needsUpdate = true;
-    this.offsetAttr.needsUpdate = this.qualityAttr.needsUpdate = this.phaseAttr.needsUpdate = true;
-
-    this.filledSegments = Math.max(this.filledSegments, ...rows);
+    this.pathPhase += phaseStep;
+    this.lastDeposit = { t: m.t, lateral: m.lateral, dirAlong, dirAcross };
     this.anyHeat = true;
     this._emitSparks(m, dt);
     this.spatterAcc += this.visualDetails ? dt * (2 + (1 - m.quality) * 22) : 0;
@@ -518,24 +499,90 @@ export class WeldBead {
     }
   }
 
+  _stamp(dt, t, lateral, dirAlong, dirAcross, phase, width, feed, m) {
+    const radius = this.halfWidth * width;
+    const length = this.poolLength * 0.65;
+    const reach = Math.max(radius, length);
+    const lo = Math.floor((t - reach / this.seam.length) * this.segments);
+    const hi = Math.ceil((t + reach / this.seam.length) * this.segments);
+    const left = Math.max(0, Math.floor((lateral - reach + this.gridHalfWidth) / this.colSpacing));
+    const right = Math.min(COLS - 1, Math.ceil((lateral + reach + this.gridHalfWidth) / this.colSpacing));
+    const defect = m.physics ? Math.max(m.physics.slagRisk, m.physics.fusionRisk) : 0;
+    for (let row = lo; row <= hi; row++) {
+      const i = this.seam.closed ? THREE.MathUtils.euclideanModulo(row, this.segments) : row;
+      if (i < 0 || i > this.segments) continue;
+      const ds = (row / this.segments - t) * this.seam.length;
+      let touched = false;
+      for (let c = left; c <= right; c++) {
+        const dx = c * this.colSpacing - this.gridHalfWidth - lateral;
+        const forward = ds * dirAlong + dx * dirAcross;
+        const sideways = dx * dirAlong - ds * dirAcross;
+        const r2 = (forward / length) ** 2 + (sideways / radius) ** 2;
+        if (r2 >= 1) continue;
+        const v = i * COLS + c;
+        const cellPhase = phase + forward / (this.halfWidth * 0.65) * Math.PI * 2
+          - Math.abs(sideways / radius) * 2.8;
+        const profile = (1 - r2) ** 0.7;
+        const ridge = 0.9 + 0.1 * Math.cos(cellPhase);
+        const added = dt * feed * profile * ridge * Math.max(0, 1 - this.aFill[v] / 2.4);
+        const blend = added / Math.max(this.aFill[v] + added, 0.000001);
+        this.aFill[v] += added;
+        this.aWidth[v] = THREE.MathUtils.lerp(this.aWidth[v], width, blend);
+        this.aOffset[v] = THREE.MathUtils.lerp(this.aOffset[v], lateral, blend);
+        this.aQuality[v] = THREE.MathUtils.lerp(this.aQuality[v], m.quality, blend);
+        this.aDefect[v] = THREE.MathUtils.lerp(this.aDefect[v], defect, blend);
+        // New molten metal remelts local surface detail; cold neighbouring
+        // strokes remain in place instead of moving to the newest torch tip.
+        const remelt = this.aHeat[v] > 0.35 ? Math.max(blend, 1 - Math.exp(-dt * profile * 10)) : blend;
+        this.aPhase[v] = THREE.MathUtils.lerp(this.aPhase[v], cellPhase, remelt);
+        this.aHeat[v] = Math.max(this.aHeat[v], 0.4 + 0.6 * profile);
+        touched = true;
+      }
+      if (!touched) continue;
+      this.hotRows.add(i); this.changedRows.add(i);
+      this.filledSegments = Math.max(this.filledSegments, i);
+      for (let c = 0; c < HAZ_COLS; c++) {
+        const v = i * HAZ_COLS + c;
+        this.hazFill[v] += (1 - this.hazFill[v]) * (1 - Math.exp(-dt * 8));
+      }
+      if (this.seam.closed && i === 0)
+        this.hazFill.copyWithin(this.segments * HAZ_COLS, 0, HAZ_COLS);
+      this._upload(this.hazFillAttr, i * HAZ_COLS, (i + 1) * HAZ_COLS);
+      if (this.seam.closed && i === 0)
+        this._upload(this.hazFillAttr, this.segments * HAZ_COLS, this.hazFill.length);
+    }
+  }
+
   /** @param {{arcOn:boolean, point:THREE.Vector3}} s point is in parent-local space */
   update(dt, s) {
     this.time += dt;
+    if (!s.arcOn) this.lastDeposit = null;
+
+    if (this.gravityEnabled) {
+      this.parent.getWorldQuaternion(this.gravityRotation).invert();
+      this.gravity.set(0, -1, 0).applyQuaternion(this.gravityRotation);
+      if (this.anyHeat) this._settleHotMetal(dt);
+    }
 
     if (this.anyHeat) {
       const decay = Math.exp(-dt / HEAT_TAU);
-      let remaining = false;
-      for (let v = 0; v < this.count; v++) {
-        if (this.aHeat[v] > 0.002) {
-          this.aHeat[v] *= decay;
-          remaining = true;
-        } else {
-          this.aHeat[v] = 0;
+      for (const row of this.hotRows) {
+        let remaining = false;
+        for (let c = 0; c < COLS; c++) {
+          const v = row * COLS + c;
+          this.aHeat[v] = this.aHeat[v] > 0.002 ? this.aHeat[v] * decay : 0;
+          remaining ||= this.aHeat[v] > 0;
         }
+        this._upload(this.heatAttr, row * COLS, (row + 1) * COLS);
+        if (this.seam.closed && row === 0) {
+          this.aHeat.copyWithin(this.segments * COLS, 0, COLS);
+          this._upload(this.heatAttr, this.segments * COLS, this.count);
+        }
+        if (!remaining) this.hotRows.delete(row);
       }
-      this.anyHeat = remaining;
-      this.heatAttr.needsUpdate = true;
+      this.anyHeat = this.hotRows.size > 0;
     }
+    this._flushSurface();
 
     const arc = s.arcOn ? 1 : 0;
     this.poolArc = THREE.MathUtils.lerp(this.poolArc ?? 0, arc, 1 - Math.exp(-dt * 18));
@@ -550,14 +597,25 @@ export class WeldBead {
     }
     // On a curved seam the puddle has to be re-aimed every frame: the surface
     // it lies on rotates underneath it as the welder travels.
-    const poolFrame = this.seam.frameAt(s.t ?? 0, _frame);
+    const poolT = s.t ?? this.poolT ?? 0;
+    const poolFrame = this.seam.frameAt(poolT, _frame);
+    this.seam.pointAt(poolT, _pt);
+    const lateral = _pt.subVectors(s.point, _pt).dot(poolFrame.lateral);
+    const row = Math.round(THREE.MathUtils.clamp(poolT, 0, 1) * this.segments);
+    const col = THREE.MathUtils.clamp(Math.round((lateral + this.gridHalfWidth) / this.colSpacing), 0, COLS - 1);
+    this.poolNormal.fromArray(this.mesh.geometry.attributes.aNormal.array, (row * COLS + col) * 3);
     if (this.seam.surfacePoint) {
-      this.seam.pointAt(s.t ?? 0, _pt);
-      const lateral = _pt.subVectors(s.point, _pt).dot(poolFrame.lateral);
-      this.seam.surfacePoint(s.t ?? 0, lateral, this.pool.position);
+      this.seam.surfacePoint(poolT, lateral, this.pool.position);
     } else this.pool.position.copy(s.point);
-    this.pool.position.addScaledVector(poolFrame.normal, Math.min(0.0022, this.height * 0.75));
-    this.pool.quaternion.setFromUnitVectors(_unitZ, poolFrame.normal);
+    // Repeated passes can rise above the old fixed-height arc quad.
+    this.pool.position.addScaledVector(this.poolNormal, this._heightAt(poolT, lateral) + 0.0008);
+    this.pool.quaternion.setFromUnitVectors(_unitZ, this.poolNormal);
+    if (this.gravityEnabled) {
+      this.gravityRotation.copy(this.pool.quaternion).invert();
+      this.poolGravity.copy(this.gravity).applyQuaternion(this.gravityRotation);
+      this.pool.material.uniforms.uGravity.value.set(this.poolGravity.x, this.poolGravity.y);
+      this.pool.material.uniforms.uRunoff.value = this.runoff;
+    }
     this.pool.material.uniforms.uTime.value = this.time;
     this.pool.material.uniforms.uArc.value = this.poolArc;
     this.light.position.copy(s.point).addScaledVector(poolFrame.normal, 0.02);
@@ -567,6 +625,11 @@ export class WeldBead {
   }
 
   reset() {
+    this.aSlope.fill(0);
+    this.aDefect.fill(0);
+    this.slopeAttr.needsUpdate = this.defectAttr.needsUpdate = true;
+    this.runoff = 0;
+    this.poolT = 0;
     this.aOffset.fill(0);
     this.aFill.fill(0);
     this.aWidth.fill(0);
@@ -582,6 +645,15 @@ export class WeldBead {
     this.qualityAttr.needsUpdate = true;
     this.phaseAttr.needsUpdate = true;
     this.filledSegments = 0;
+    this.lastDeposit = null; this.pathPhase = 0;
+    this.hotRows.clear(); this.changedRows.clear(); this.normalRows.clear(); this.flowCells.clear();
+    for (const key of this.flowFields) this.flow[key].fill(0);
+    // A reset touches every cell, even if a partial upload was still pending.
+    for (const attr of Object.values(this.mesh.geometry.attributes)) attr.clearUpdateRanges();
+    this.hazFillAttr.clearUpdateRanges();
+    for (const key of this.flowFields) this._upload(this.mesh.geometry.attributes['a' + key], 0, this.count);
+    this._upload(this.slopeAttr, 0, this.aSlope.length);
+    this._upload(this.hazFillAttr, 0, this.hazFill.length);
     this.anyHeat = false;
     this.mesh.visible = this.heatTint.visible = this.pool.visible = this.sparks.visible = false;
     this.poolArc = 0;
@@ -593,19 +665,121 @@ export class WeldBead {
     this.spatterAcc = 0;
   }
 
+  // Conservative transport on the fixed surface grid. Only molten material
+  // flows; cooling freezes the shape. This remains a visual training model.
+  _settleHotMetal(dt) {
+    const laterals = this.mesh.geometry.attributes.aLateral.array;
+    for (const i of this.hotRows) {
+      const frame = this.seam.frameAt(i / this.segments, _frame);
+      const along = this.gravity.dot(frame.travel);
+      for (let c = 0; c < COLS; c++) {
+        const v = i * COLS + c;
+        if (this.aHeat[v] <= 0.35 || this.aFill[v] <= 0.002) continue;
+        const mobility = (this.aHeat[v] - 0.35) / 0.65;
+        const creep = Math.min(dt, 0.05) * 0.0015 * mobility * (0.6 + this.runoff * 0.4);
+        const across = this.gravity.x * laterals[v * 3] + this.gravity.y * laterals[v * 3 + 1]
+          + this.gravity.z * laterals[v * 3 + 2];
+        let nextRow = i + Math.sign(along);
+        if (this.seam.closed) nextRow = THREE.MathUtils.euclideanModulo(nextRow, this.segments);
+        if (nextRow >= 0 && nextRow <= this.segments)
+          this._flowMetal(v, nextRow * COLS + c, Math.min(0.12, Math.abs(along) * creep / this.rowSpacing));
+        const nextCol = c + Math.sign(across);
+        if (nextCol >= 0 && nextCol < COLS)
+          this._flowMetal(v, i * COLS + nextCol, Math.min(0.12, Math.abs(across) * creep / this.colSpacing));
+      }
+    }
+    // Apply all fluxes together, so scan order cannot accelerate the flow.
+    for (const v of this.flowCells) {
+      const oldFill = this.aFill[v];
+      const fill = Math.max(0, oldFill + this.flow.Fill[v]);
+      for (const key of this.flowFields) {
+        if (key !== 'Fill') this['a' + key][v] = fill > 0.000001
+          ? (this['a' + key][v] * oldFill + this.flow[key][v]) / fill : 0;
+        this.flow[key][v] = 0;
+      }
+      this.aFill[v] = fill;
+      const row = Math.floor(v / COLS);
+      this.changedRows.add(row); this.hotRows.add(row);
+    }
+    this.flowCells.clear();
+  }
+
+  _flowMetal(from, to, fraction) {
+    if (from === to || fraction < 0.000001) return;
+    const amount = this.aFill[from] * fraction;
+    for (const key of this.flowFields) {
+      const value = key === 'Fill' ? 1 : this['a' + key][from];
+      this.flow[key][from] -= amount * value;
+      this.flow[key][to] += amount * value;
+    }
+    this.flowCells.add(from); this.flowCells.add(to);
+  }
+
+  _upload(attribute, start, end) {
+    // Merge pending edits into one range; the renderer clears it after upload.
+    const range = attribute.updateRanges[0];
+    if (range) {
+      const last = Math.max(range.start + range.count, end);
+      range.start = Math.min(range.start, start); range.count = last - range.start;
+    } else attribute.addUpdateRange(start, end - start);
+    attribute.needsUpdate = true;
+  }
+
+  _heightAt(t, lateral) {
+    const y = (this.seam.closed ? THREE.MathUtils.euclideanModulo(t, 1) : THREE.MathUtils.clamp(t, 0, 1)) * this.segments;
+    const x = THREE.MathUtils.clamp((lateral + this.gridHalfWidth) / this.colSpacing, 0, COLS - 1);
+    const row = Math.floor(y), col = Math.floor(x), nextRow = Math.min(row + 1, this.segments), nextCol = Math.min(col + 1, COLS - 1);
+    const a = THREE.MathUtils.lerp(this.aFill[row * COLS + col], this.aFill[row * COLS + nextCol], x - col);
+    const b = THREE.MathUtils.lerp(this.aFill[nextRow * COLS + col], this.aFill[nextRow * COLS + nextCol], x - col);
+    return THREE.MathUtils.lerp(a, b, y - row) * this.height;
+  }
+
+  _flushSurface() {
+    if (!this.changedRows.size) return;
+    if (this.seam.closed && this.changedRows.has(0)) {
+      for (const key of this.flowFields) this['a' + key].copyWithin(this.segments * COLS, 0, COLS);
+      this.changedRows.add(this.segments);
+    }
+    for (const row of this.changedRows) {
+      for (const key of this.flowFields)
+        this._upload(this.mesh.geometry.attributes['a' + key], row * COLS, (row + 1) * COLS);
+      for (let offset = -1; offset <= 1; offset++) {
+        const i = this.seam.closed ? THREE.MathUtils.euclideanModulo(row + offset, this.segments) : row + offset;
+        if (i < 0 || i > this.segments) continue;
+        this.normalRows.add(i);
+        if (this.seam.closed && i === 0) this.normalRows.add(this.segments);
+      }
+    }
+    for (const row of this.normalRows) {
+      const prev = this.seam.closed ? THREE.MathUtils.euclideanModulo(row - 1, this.segments) : Math.max(0, row - 1);
+      const next = this.seam.closed ? (row + 1) % this.segments : Math.min(this.segments, row + 1);
+      const ds = (this.seam.closed ? 2 : next - prev) * this.rowSpacing;
+      for (let c = 0; c < COLS; c++) {
+        const v = row * COLS + c, left = Math.max(0, c - 1), right = Math.min(COLS - 1, c + 1);
+        this.aSlope[v * 2] = this.height * (this.aFill[row * COLS + right] - this.aFill[row * COLS + left])
+          / ((right - left) * this.colSpacing);
+        this.aSlope[v * 2 + 1] = this.height * (this.aFill[next * COLS + c] - this.aFill[prev * COLS + c]) / ds;
+      }
+      this._upload(this.slopeAttr, row * COLS * 2, (row + 1) * COLS * 2);
+    }
+    this.changedRows.clear(); this.normalRows.clear();
+  }
+
   /** Coverage and mean quality over the part of the seam that got welded. */
   getStats() {
     let covered = 0;
     let qualitySum = 0;
-    for (let i = 0; i <= this.segments; i++) {
-      const v = i * COLS + 2; // centre column
-      if (this.aFill[v] > 0.5) {
+    const rows = this.seam.closed ? this.segments : this.segments + 1;
+    for (let i = 0; i < rows; i++) {
+      // Coverage is evaluated at the joint, not at an arbitrary side vertex.
+      const v = i * COLS + (COLS - 1) / 2;
+      if (this.aFill[v] > 0.25) {
         covered++;
         qualitySum += this.aQuality[v];
       }
     }
     return {
-      coverage: covered / (this.segments + 1),
+      coverage: covered / rows,
       quality: covered ? qualitySum / covered : 0,
     };
   }
@@ -652,9 +826,10 @@ export class WeldBead {
         aLateral[v * 3] = frame.lateral.x;
         aLateral[v * 3 + 1] = frame.lateral.y;
         aLateral[v * 3 + 2] = frame.lateral.z;
-        aNormal[v * 3] = frame.normal.x;
-        aNormal[v * 3 + 1] = frame.normal.y;
-        aNormal[v * 3 + 2] = frame.normal.z;
+        const pipeSide = this.seam.plateAim && across > 0;
+        aNormal[v * 3] = pipeSide ? -frame.lateral.x : frame.normal.x;
+        aNormal[v * 3 + 1] = pipeSide ? -frame.lateral.y : frame.normal.y;
+        aNormal[v * 3 + 2] = pipeSide ? -frame.lateral.z : frame.normal.z;
         aSide[v] = HAZ_SIDES[c];
       }
       if (i < segments) {
@@ -725,7 +900,8 @@ export class WeldBead {
 
   _buildPool(options = {}) {
     const material = new THREE.ShaderMaterial({
-      uniforms: { uTime: { value: 0 }, uArc: { value: 0 } },
+      uniforms: { uTime: { value: 0 }, uArc: { value: 0 },
+        uGravity: { value: new THREE.Vector2() }, uRunoff: { value: 0 } },
       vertexShader: POOL_VERT,
       fragmentShader: POOL_FRAG,
       transparent: true,

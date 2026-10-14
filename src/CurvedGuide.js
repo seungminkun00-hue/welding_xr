@@ -70,7 +70,7 @@ class StrokeGuide {
     this.segments = options.segments ?? 160;
     this.zoneHalfWidth = options.zoneHalfWidth ?? 0.006;
     this.colorZone = new THREE.Color(options.colorZone ?? 0xffc61a);
-    this.colorPath = new THREE.Color(options.colorPath ?? 0x1766ff);
+    this.colorPath = new THREE.Color(stroke.colorPath ?? options.colorPath ?? 0x1766ff);
     this.colorTieIn = new THREE.Color(options.colorTieIn ?? 0xff4fd0);
 
     this.strokeLength = stroke.span * seam.length;
@@ -126,6 +126,13 @@ class StrokeGuide {
 
     // Tie-ins, drawn only where there is actually overlap to make.
     this.tieIns = [];
+    for (const [p0, p1] of stroke.overlapRanges ?? []) {
+      this.tieIns.push(this._ribbon({
+        p0, p1, halfWidth: this.zoneHalfWidth, lift: 0.0017,
+        frag: TIEIN_FRAG, blending: THREE.NormalBlending,
+        uniforms: { uColor: { value: this.colorTieIn.clone() } },
+      }));
+    }
     if (lead > 1e-6) {
       this.tieIns.push(
         this._ribbon({
@@ -156,7 +163,7 @@ class StrokeGuide {
     // Strike here, stop here. On a circle these are the only two features that
     // tell the welder a lap is not what is being asked for.
     this.strikeMark = this._crossBar(0, 0x35ff7a);
-    this.stopMark = this._crossBar(1, 0xff5a3c);
+    this.stopMark = this._crossBar(1, stroke.requireArcBreak === false ? 0xffcc54 : 0xff5a3c);
 
     this.setActive(false);
   }
@@ -179,7 +186,7 @@ class StrokeGuide {
       for (let s = 0; s < 2; s++) {
         const side = s === 0 ? -1 : 1;
         const v = i * 2 + s;
-        const across = side * halfWidth + lateralOffset;
+        const across = side * halfWidth + lateralOffset + (this.stroke.profile.lateralOffset ?? 0);
         if (this.seam.surfacePoint) this.seam.surfacePoint(t, across, surface);
         else surface.copy(_p).addScaledVector(frame.lateral, across);
         surface.addScaledVector(frame.normal, lift).toArray(positions, v * 3);
@@ -235,6 +242,7 @@ class StrokeGuide {
     const t = this.stroke.tAt(p);
     this.seam.pointAt(t, _p);
     const frame = this.seam.frameAt(t, _frame);
+    _p.addScaledVector(frame.lateral, this.stroke.profile.lateralOffset ?? 0);
     const half = this.zoneHalfWidth * 1.8;
     const geometry = new THREE.BufferGeometry();
     const a = _p.clone().addScaledVector(frame.lateral, -half);
@@ -307,6 +315,7 @@ class StrokeGuide {
  */
 export class CurvedGuide {
   constructor(parent, seam, plan, options = {}) {
+    this.options = options;
     this.parent = parent;
     this.seam = seam;
     this.plan = plan;
@@ -348,6 +357,12 @@ export class CurvedGuide {
     return mesh;
   }
 
+  refreshPaths() {
+    this.strokes.forEach(g => g.dispose());
+    this.strokes = this.plan.strokes.map(s => new StrokeGuide(this.group, this.seam, s, this.options));
+    this.activeIndex = -1;
+  }
+
   /**
    * @param {{strokeIndex:number, progressP:number, cursorT:number,
    *          onSeam:boolean, arcOn:boolean, severity:number}} state
@@ -357,7 +372,10 @@ export class CurvedGuide {
 
     if (state.strokeIndex !== this.activeIndex) {
       this.activeIndex = state.strokeIndex;
-      this.strokes.forEach((g, i) => g.setActive(i === this.activeIndex));
+      this.strokes.forEach((g, i) => {
+        g.setActive(i === this.activeIndex);
+        g.group.visible = !this.plan.activeGuideOnly || g.active;
+      });
     }
 
     for (const g of this.strokes) {
@@ -373,6 +391,7 @@ export class CurvedGuide {
     // every frame: on a pipe the surface it sits on turns under it.
     this.seam.pointAt(this.cursorT, _p);
     const frame = this.seam.frameAt(this.cursorT, _frame);
+    if (this.seam.plateAim) _p.addScaledVector(frame.lateral, state.lateral ?? 0);
     this.ring.position.copy(_p).addScaledVector(frame.normal, 0.0018);
     this.ring.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), frame.normal);
 

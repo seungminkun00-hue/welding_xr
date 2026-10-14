@@ -66,7 +66,7 @@ export function plateFixtures(parent, plateSize = 0.17, plateHeight = plateSize,
     bolt.position.set(side * (plateSize / 2 - 0.018), bottom + 0.016, 0.011);
     parent.add(bolt);
   }
-  const outline = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(plateSize, plateHeight, 0.012)), new THREE.LineBasicMaterial({ color: 0x9aa8ac, transparent: true, opacity: 0.45 }));
+  const outline = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(plateSize, plateHeight, 0.012)), new THREE.LineBasicMaterial({ color: 0x9aa8ac, transparent: true, opacity: 0.45, depthWrite: false }));
   outline.position.y = centerY;
   outline.position.z = -0.006;
   parent.add(outline);

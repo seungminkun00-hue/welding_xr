@@ -129,6 +129,10 @@ export class PhysicalControllers {
         continue;
       }
       const fresh = !anchor.visible;
+      const p = gripPose.transform.position, q = gripPose.transform.orientation;
+      this.position.set(p.x, p.y, p.z); this.rotation.set(q.x, q.y, q.z, q.w);
+      if (data.tracked && (anchor.position.distanceToSquared(this.position) > 0.12 ** 2
+        || anchor.quaternion.angleTo(this.rotation) > Math.PI / 3)) this.release(anchor);
       const alpha = 1 - Math.exp(-Math.max(dt, 0) / 0.018);
       this.applyPose(anchor, gripPose, alpha, fresh);
       anchor.visible = data.tracked = true; data.lastPoseTime = now;

@@ -13,6 +13,19 @@ function check(label, ok, detail) {
 }
 const near = (a, b, tol) => Math.abs(a - b) <= tol;
 
+// Measure the deposited cross-section, independent of vertex-count changes.
+function section(bead, t = 0.5) {
+  const cols = bead.count / (bead.segments + 1), row = Math.round(t * bead.segments);
+  const sides = bead.mesh.geometry.attributes.aSide.array;
+  let min = Infinity, max = -Infinity, mass = 0, moment = 0;
+  for (let c = 0; c < cols; c++) {
+    const v = row * cols + c, x = sides[v] * bead.halfWidth, fill = bead.aFill[v];
+    if (fill > 0.02) { min = Math.min(min, x); max = Math.max(max, x); }
+    mass += fill; moment += x * fill;
+  }
+  return { width: mass ? max - min : 0, center: mass ? moment / mass : 0 };
+}
+
 const SEAM_LENGTH = 0.24;
 const seam = new WeldSeam({
   start: new THREE.Vector3(0, 0, SEAM_LENGTH / 2),
@@ -112,8 +125,7 @@ check('sloppy pass scores lower than textbook', sloppy.report.total < good.repor
 check('sloppy depth reads too far', sloppy.last.depthErr > 1, sloppy.last.depthErr.toFixed(2));
 check('sloppy crosshair is off centre', Math.abs(sloppy.last.center.x) > 1, sloppy.last.center.x.toFixed(2));
 check('sloppy needle is past the green band', sloppy.last.speedFraction > 0.62, sloppy.last.speedFraction.toFixed(3));
-check('sloppy bead is thinner than textbook', sloppy.bead.aWidth[400] < good.bead.aWidth[400],
-  `${sloppy.bead.aWidth[400].toFixed(2)} vs ${good.bead.aWidth[400].toFixed(2)}`);
+check('sloppy bead is thinner than textbook', section(sloppy.bead).width < section(good.bead).width);
 
 // Crawling: the bead should pile up wider than the textbook pass.
 const slow = runPass({
@@ -125,8 +137,7 @@ const slow = runPass({
   label: 'crawling',
 });
 check('crawling needle is below the green band', slow.last.speedFraction < 0.38, slow.last.speedFraction.toFixed(3));
-check('crawling bead is wider than textbook', slow.bead.aWidth[400] > good.bead.aWidth[400],
-  `${slow.bead.aWidth[400].toFixed(2)} vs ${good.bead.aWidth[400].toFixed(2)}`);
+check('crawling bead is wider than textbook', section(slow.bead).width > section(good.bead).width);
 
 // A drifting torch must drag the bead off the centreline with it.
 const drift = runPass({
@@ -137,8 +148,51 @@ const drift = runPass({
   workDeg: 0,
   label: 'off-seam',
 });
-check('bead follows the torch off the seam', near(drift.bead.aOffset[400], 0.007, 0.001),
-  drift.bead.aOffset[400].toFixed(4));
+check('bead follows the torch off the seam', near(section(drift.bead).center, 0.007, 0.001),
+  section(drift.bead).center.toFixed(4));
+
+// Both side dwells must survive; the newest stroke cannot drag the old bead.
+{
+  const bead = new WeldBead(new THREE.Group(), seam);
+  bead.visualDetails = false;
+  const point = seam.pointAt(0.5), dt = 1 / 90;
+  const dwell = lateral => {
+    for (let i = 0; i < 90; i++) {
+      bead.deposit(dt, { t: 0.5, lateral, speedRatio: 1, quality: 1 });
+      bead.update(dt, { arcOn: true, point, t: 0.5 });
+    }
+    bead.update(dt, { arcOn: false, point, t: 0.5 });
+  };
+  dwell(-0.006);
+  const leftHeight = bead._heightAt(0.5, -0.006);
+  dwell(0.006);
+  check('weave retains the earlier side dwell', bead._heightAt(0.5, -0.006) >= leftHeight * 0.99);
+  check('weave deposits on both sides', leftHeight > 0.001 && bead._heightAt(0.5, 0.006) > 0.001);
+  check('wide weave broadens the finished bead', section(bead).width > section(good.bead).width * 1.5);
+  const rightHeight = bead._heightAt(0.5, 0.006);
+  dwell(0.006);
+  check('longer edge dwell adds local height', bead._heightAt(0.5, 0.006) > rightHeight);
+  bead.dispose();
+}
+
+// Gravity moves molten metal without adding volume, then stops on cooling.
+{
+  const parent = new THREE.Group(); parent.rotation.z = Math.PI / 2;
+  const bead = new WeldBead(parent, seam, { gravity: true });
+  bead.visualDetails = false;
+  for (let i = 0; i < 90; i++) bead.deposit(1 / 90, { t: 0.5, lateral: 0, speedRatio: 1, quality: 1 });
+  const mass = () => bead.aFill.reduce((sum, value) => sum + value, 0);
+  const before = mass(), point = seam.pointAt(0.5);
+  for (let i = 0; i < 720; i++) bead.update(1 / 90, { arcOn: false, point, passive: true });
+  check('molten flow conserves deposited volume', near(mass(), before, before * 0.0001));
+  check('rotated workpiece uses world gravity', section(bead).center < -0.0001);
+  const frozen = bead.aFill.slice();
+  for (let i = 0; i < 90; i++) bead.update(1 / 90, { arcOn: false, point, passive: true });
+  check('cooled bead keeps its shape', frozen.every((value, i) => value === bead.aFill[i]));
+  bead.reset();
+  check('reset clears both deposited metal and heat', mass() === 0 && bead.hotRows.size === 0);
+  bead.dispose();
+}
 
 // Travel angle shows up on the crosshair's vertical axis, not the horizontal.
 const dragged = runPass({

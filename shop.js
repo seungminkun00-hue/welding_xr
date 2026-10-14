@@ -20,7 +20,7 @@ import { WeldSeam } from './src/WeldSeam.js';
 import { LinearGuide } from './src/LinearGuide.js';
 import { WeldSession } from './src/WeldSession.js';
 import { pipeFilletSeam } from './src/SeamCurve.js';
-import { pipeFilletPlan } from './src/PassPlan.js';
+import { basicDownhillPlan } from './src/PassPlan.js';
 import { CurvedGuide } from './src/CurvedGuide.js';
 import { JointSession } from './src/JointSession.js';
 import { WeldBead, weldBeadOptions } from './src/WeldBead.js';
@@ -36,9 +36,8 @@ import { StatsBoard } from './src/StatsBoard.js';
 // one bench and the free hand points at whichever one you want. Nothing
 // reloads, so the session survives the switch.
 //
-// index.html and pipe.html still exist and still work; this is a third entry
-// point, not a replacement, so a problem here cannot take the two working
-// exercises down with it.
+// All basic entry pages load this workshop. The old pipe URL only selects
+// the initial exercise; both workpieces and both selectors remain available.
 // ---------------------------------------------------------------------------
 
 const BENCH_HEIGHT = 0.9;
@@ -186,7 +185,7 @@ function buildPlateStation() {
 
   return {
     id: 'plate',
-    title: '평판 맞대기',
+    title: '직선 용접 · 평판',
     hint: 'MIG · 1G 기초연습',
     group, picks, seam, guide, bead, session, poseGuide,
     desktop, desktopTorch,
@@ -243,6 +242,7 @@ function buildPlateStation() {
         t: THREE.MathUtils.clamp(m.t, 0, 1),
         lateral: m.lateral,
         speedRatio: m.speedRatio,
+        nominalSpeed: session.idealSpeed,
         quality: m.quality,
       };
     },
@@ -347,13 +347,15 @@ function buildPipeStation() {
     wallNormal: new THREE.Vector3(0, 0, 1),
     up: new THREE.Vector3(0, 1, 0),
     radius: PIPE_OUTER,
+    plateAim: true,
   });
 
-  const plan = pipeFilletPlan(seam);
+  const plan = basicDownhillPlan(seam);
   const guide = new CurvedGuide(group, seam, plan, { zoneHalfWidth: 0.0055 });
-  const bead = new WeldBead(group, seam, weldBeadOptions({ scale: 0.68, segments: 320 }));
+  const bead = new WeldBead(group, seam, { ...weldBeadOptions({ scale: 0.68, segments: 320 }), gravity: true });
   const session = new JointSession(seam, plan, {
     standoffTol: 0.0024, lateralTol: 0.0035, angleTol: 22, speedTol: 0.0018,
+    workpiece: group,
   });
   const poseGuide = new PoseGuide(group, seam);
 
@@ -362,7 +364,8 @@ function buildPipeStation() {
   const demoPlayer = new MasterDemo(seam, plan, poseGuide);
   group.add(desktopTorch);
 
-  const desktop = { p: 0, lateral: 0, height: 0.0028, travelAngle: -10, workAngle: 0 };
+  const desktop = { p: 0, lateral: plan.current.lateralAt(0, seam.length), height: 0.0028,
+    travelAngle: plan.current.sample(0).travelAngle, workAngle: plan.current.sample(0).workAngle };
   let lastStrokeIndex = 0;
 
   const TRAVEL_SPEED = 0.0030, LATERAL_SPEED = 0.008, STANDOFF_SPEED = 0.008, BOOST = 8;
@@ -378,8 +381,8 @@ function buildPipeStation() {
     const frame = seam.frameAt(activeStroke().tAt(desktop.p), _frame);
     return target
       .copy(frame.normal).negate()
-      .applyAxisAngle(frame.lateral, THREE.MathUtils.degToRad(desktop.travelAngle))
-      .applyAxisAngle(frame.travel, THREE.MathUtils.degToRad(desktop.workAngle))
+      .addScaledVector(frame.travel, Math.tan(THREE.MathUtils.degToRad(desktop.travelAngle)))
+      .addScaledVector(frame.lateral, Math.tan(THREE.MathUtils.degToRad(desktop.workAngle)))
       .normalize();
   };
 
@@ -395,7 +398,7 @@ function buildPipeStation() {
   return {
     id: 'pipe',
     title: '파이프 원주 필릿',
-    hint: '피복아크 · 2획 기초연습',
+    hint: '하진 궤적 · 오버랩 · 마무리 편도 4회',
     group,
     picks: [pipe, rim, block],
     seam, guide, bead, session, poseGuide, demoPlayer,
@@ -442,8 +445,9 @@ function buildPipeStation() {
       if (m.strokeIndex !== lastStrokeIndex) {
         lastStrokeIndex = m.strokeIndex;
         poseGuide?.reset();
-        desktop.p = strokeStartP();
-        desktop.lateral = 0;
+        const continuous = m.stroke?.requireArcBreak === false && plan.current;
+        desktop.p = continuous ? plan.current.progressOf(m.t) : strokeStartP();
+        if (!continuous) desktop.lateral = activeStroke().lateralAt(0, seam.length);
       }
     },
 
@@ -453,6 +457,7 @@ function buildPipeStation() {
         strokeIndex: m.strokeIndex,
         progressP: weldedP,
         cursorT: m.t,
+        lateral: m.lateral,
         onSeam: m.onSeam,
         arcOn: m.welding,
         severity: m.welding ? m.severity : 0,
@@ -469,7 +474,9 @@ function buildPipeStation() {
         t: m.t,
         lateral: m.lateral,
         speedRatio: Math.abs(m.speedRatio),
+        nominalSpeed: m.target?.speed,
         quality: m.quality,
+        physics: m.physics, dir: m.stroke?.dir,
       };
     },
 
@@ -482,7 +489,7 @@ function buildPipeStation() {
       return `${stroke.label ?? '파이프 필릿'} · 진행 ${Math.round((session.stats?.maxP ?? 0) * 100)}%` +
         ` · 아크길이 ${(m.height * 1000).toFixed(1)}mm` +
         ` · 속도 ${((m.strokeSpeed ?? 0) * 1000).toFixed(1)}mm/s` +
-        ` · 작업각오차 ${(m.workAngleDeg ?? 0).toFixed(0)}°`;
+        ` · 작업각오차 ${((m.workAngleDeg ?? 0) - (m.target?.workAngle ?? 0)).toFixed(0)}°`;
     },
 
     updatePose(dt) {
@@ -509,10 +516,11 @@ function buildPipeStation() {
       const rows = (r.strokes ?? []).map((s) =>
         `<div class="bar"><span>${s.label}</span><b>${s.coverage}%</b></div>
          <p class="hint">아크길이 ${s.arc}% · 중앙 ${s.center}% · 속도 ${s.speed}% ·
-         작업각(45°) ${s.work}% · 이음부 ${s.tieIn}% · 진행방향 ${s.direction}%</p>`
+         작업각 ${s.work}% · 이음부 ${s.tieIn}% · 진행방향 ${s.direction}%</p>`
       ).join('');
       return `<h2>파이프 필릿 · ${r.total}점</h2>${rows}
         <div class="bar"><span>비드 적층률</span><b>${r.coverage}%</b></div>
+        ${r.physics ? `<p class="hint">모델 지표(0~100): 용입 ${r.physics.penetration} · 흘러내림 ${r.physics.runoff} · 융합불량 ${r.physics.fusionRisk} · 슬래그 ${r.physics.slagRisk} — 실제 결함 판정 아님</p>` : ''}
         <p class="hint">아크 시간 ${r.arcTime.toFixed(1)}초 · R 키로 다시 시도</p>`;
     },
 
@@ -521,10 +529,10 @@ function buildPipeStation() {
       bead.reset();
       poseGuide?.reset();
       desktop.p = strokeStartP();
-      desktop.lateral = 0;
+      desktop.lateral = activeStroke().lateralAt(0, seam.length);
       desktop.height = 0.0028;
-      desktop.travelAngle = -10;
-      desktop.workAngle = 0;
+      desktop.travelAngle = activeStroke().sample(0).travelAngle;
+      desktop.workAngle = activeStroke().sample(0).workAngle;
       lastStrokeIndex = 0;
     },
   };
@@ -540,7 +548,9 @@ const WELDING_HAND = 'right';
 const plateStation = buildPlateStation();
 const pipeStation = buildPipeStation();
 const stations = [plateStation, pipeStation];
-let active = plateStation;
+const requestedExercise = new URLSearchParams(location.search).get('exercise');
+let active = (requestedExercise === 'pipe' ||
+  (!requestedExercise && location.pathname.endsWith('/pipe.html'))) ? pipeStation : plateStation;
 
 
 const hud = new TorchHud(scene, { width: 0.1, offset: 0.075 });
@@ -789,6 +799,12 @@ const trainingUI = new TrainingUI({
   helmet, vrControls, getDemo: () => demo, toggleDemo,
   supportsDemo: () => active.supportsDemo, reset: resetActive,
   selectStation: id => selectStation(stations.find(s => s.id === id)),
+  getTechnique: () => active.session.plan?.technique,
+  setTechnique: value => {
+    active.session.plan?.setTechnique?.(value);
+    active.guide.refreshPaths();
+    resetActive();
+  },
 });
 
 const overlay = document.getElementById('overlay');
@@ -903,10 +919,15 @@ function animate(time, xrFrame) {
   else { _viewer.copy(camera.position); _viewerQ.copy(camera.quaternion); }
 
   trainingUI.update(xrFrame);
+  for (const station of stations) {
+    if (station !== active) station.bead.update(dt, { arcOn: false, point: _contact, t: 0, passive: true });
+  }
   vrControls.update(_viewer, demo);
   gripMarker.visible = gripController.visible;
   if (demo) {
     active.demoPlayer.update(dt);
+    board.demoStage = active.session.plan?.sequential
+      ? active.session.plan.strokes[active.demoPlayer.index].label : null;
     active.guide.setVisible(false);
     hud.setVisible(false);
     active.bead.update(dt, { arcOn: false, point: _contact, t: 0 });
@@ -977,9 +998,11 @@ function animate(time, xrFrame) {
   window.weldReady = true;
 }
 
-// The inactive station starts hidden-guided and torch-less.
-pipeStation.guide.setVisible(false);
-pipeStation.poseGuide?.setVisible(false);
+// Only the selected exercise starts with guides. Both workpieces stay visible.
+for (const station of stations) {
+  station.guide.setVisible(station === active && trainingUI.guides);
+  station.poseGuide?.setVisible(station === active && trainingUI.guides);
+}
 board.setVisible(true);
 syncTorchVisibility();
 

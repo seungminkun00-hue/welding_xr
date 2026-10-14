@@ -442,6 +442,7 @@ function animate(time, xrFrame) {
       t: liveT,
       lateral: m.lateral,
       speedRatio: m.speedRatio,
+      nominalSpeed: session.idealSpeed,
       quality: m.quality,
     });
   }

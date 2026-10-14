@@ -223,8 +223,11 @@ export class SeamCurve {
  * The frame normal is the 45 degree bisector between the pipe wall and the
  * flat face, so "hold the rod at 45 degrees" becomes the single constant
  * workAngle = 0 in seam space, the whole way round.
+ * With plateAim, the frame normal is the plate normal instead. Negative
+ * lateral measures the actual radial distance outward on the plate, and
+ * workAngle = 0 means perpendicular to the plate. The joint radius is fixed.
  */
-export function pipeFilletSeam({ center, wallNormal, up, radius, resolution = 480 }) {
+export function pipeFilletSeam({ center, wallNormal, up, radius, resolution = 480, plateAim = false }) {
   const axis = wallNormal.clone().normalize();
   // Twelve o'clock straight up; three and nine o'clock on the cross axis.
   const u = up.clone().addScaledVector(axis, -up.dot(axis)).normalize();
@@ -239,7 +242,7 @@ export function pipeFilletSeam({ center, wallNormal, up, radius, resolution = 48
       const radial = u.clone().multiplyScalar(Math.cos(theta)).addScaledVector(v, Math.sin(theta));
       return {
         position: center.clone().addScaledVector(radial, radius),
-        normal: radial.clone().add(axis).normalize(), // 45 degree joint bisector
+        normal: plateAim ? axis.clone() : radial.clone().add(axis).normalize(),
       };
     },
     { closed: true, resolution }
@@ -248,9 +251,18 @@ export function pipeFilletSeam({ center, wallNormal, up, radius, resolution = 48
   seam.center = center.clone();
   seam.radius = radius;
   seam.axis = axis;
+  seam.plateAim = plateAim;
   seam.upAxis = u;
   seam.rightAxis = v;
   seam.surfacePoint = (t, lateral, target = new THREE.Vector3()) => {
+    if (plateAim) {
+      // Negative lateral is radially outward on the plate. Positive lateral
+      // folds onto the pipe wall; the physical joint stays at its true radius.
+      seam.pointAt(t, target);
+      if (lateral >= 0) return target.addScaledVector(axis, lateral);
+      const radial = target.clone().sub(center).normalize();
+      return target.addScaledVector(radial, -lateral);
+    }
     const frame = seam.frameAt(t);
     const p = seam.pointAt(t).addScaledVector(frame.lateral, lateral);
     const relative = p.clone().sub(center);
