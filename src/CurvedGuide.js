@@ -68,6 +68,7 @@ class StrokeGuide {
     parent.add(this.group);
 
     this.segments = options.segments ?? 160;
+    this.depthTest = options.depthTest ?? false;
     this.zoneHalfWidth = options.zoneHalfWidth ?? 0.006;
     this.colorZone = new THREE.Color(options.colorZone ?? 0xffc61a);
     this.colorPath = new THREE.Color(stroke.colorPath ?? options.colorPath ?? 0x1766ff);
@@ -218,13 +219,9 @@ class StrokeGuide {
       fragmentShader: frag,
       transparent: true,
       depthWrite: false,
-      // Drawn through the metal on purpose. On a pipe the far half of the seam
-      // is behind the pipe from every single viewpoint, so a depth-tested
-      // guide would only ever show the welder the quarter they are already
-      // looking at -- and the one thing this guide has to communicate is the
-      // shape of the whole plan, including the half they will have to move
-      // round to reach.
-      depthTest: false,
+      // Basic exercises can show the complete route. Applied exercises respect
+      // the metal surface so a hidden route cannot look like a reachable start.
+      depthTest: this.depthTest,
       blending,
       side: THREE.DoubleSide,
       forceSinglePass: true,
@@ -259,7 +256,7 @@ class StrokeGuide {
         color,
         transparent: true,
         depthWrite: false,
-        depthTest: false,
+        depthTest: this.depthTest,
       })
     );
     line.frustumCulled = false;
@@ -348,7 +345,7 @@ export class CurvedGuide {
         fragmentShader: RING_FRAG,
         transparent: true,
         depthWrite: false,
-        depthTest: false,
+        depthTest: this.options.depthTest ?? false,
       })
     );
     mesh.frustumCulled = false;

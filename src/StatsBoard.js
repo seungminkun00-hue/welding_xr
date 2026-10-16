@@ -160,7 +160,7 @@ export class StatsBoard {
     if (!applied && settings.selectStation) {
       this._button('plate', '직선 용접', 536, 20, 220, 52, true, this.exercise === 'plate');
       this._button('pipe', '파이프 용접', 768, 20, 228, 52, true, this.exercise === 'pipe');
-    } else this._text(applied ? settings.jointLabel ?? '작은 배관 접합' : this.exercise === 'pipe' ? '파이프 원주 필릿' : '직선 용접 · 평판', 540, 55, 27);
+    } else this._text(applied ? settings.jointLabel ?? '작은 배관 접합' : this.exercise === 'pipe' ? '파이프 원주 필릿' : '직선 용접 · 평판', 540, 55, applied ? 20 : 27);
     if (this.settingsOpen) this._settings(settings);
     else if (settings.demo) {
       this._text('명장 시연 · 고스트만 재생 중', 58, 168, 36, GREEN);
@@ -188,12 +188,15 @@ export class StatsBoard {
     this._text('훈련 설정', 42, 118, 32, GREEN);
     this._button('guide', '가이드라인  ' + (s.guides ? '켜짐' : '꺼짐'), 42, 145, 450, 62, true, s.guides);
     this._button('demo', s.demo ? '명장 시연 종료' : '명장 시연 · 고스트', 520, 145, 460, 62, s.supportsDemo, s.demo);
-    this._text('입력: Meta 양손 컨트롤러', 60, 262, 26, DIM);
+    this._text(s.unified && !s.inputState?.sessionActive ? '입력: 마우스 · 키보드' : '입력: Meta 양손 컨트롤러', 60, 262, 26, DIM);
     this._button('helmet', '용접 마스크  ' + (s.helmet ? '켜짐' : '꺼짐'), 520, 223, 460, 62, s.hasHelmet, s.helmet);
     this._button('help', '조작 안내  ' + (s.help ? '켜짐' : '꺼짐'), 42, 301, 450, 62, true, s.help);
     this._button('reset', '현재 연습 다시 시작', 520, 301, 460, 62);
     if (!s.supportsDemo) this._text('명장 시연은 파이프 연습에서 제공됩니다.', 42, 455, 21, DIM);
-    if (s.selectStation) {
+    if (s.unified && s.mode !== 'applied') {
+      this._text('기초 → 응용 · 한 과제씩 이어서 연습', 42, 415, 24, DIM);
+      this._button('next-joint', '다음 과제 ▶', 520, 379, 460, 62, s.hasNextJoint);
+    } else if (s.selectStation && s.mode !== 'applied') {
       this._text('상단의 직선 용접 / 파이프 용접으로 과제를 전환하세요.', 42, 415, 25, DIM);
     }
     if (s.mode === 'applied') {
@@ -201,14 +204,21 @@ export class StatsBoard {
       this._button('next-joint', '다음 용접부 선택', 520, 379, 460, 62, s.hasNextJoint);
       this._text(s.positioner ?? '', 42, 459, 21, '#ffd773');
     } else if (!s.technique) {
-      this._text('모드를 이동하면 VR에 다시 입장하세요.', 520, 455, 21, DIM);
+      this._text(s.unified ? '테이블 다음 버튼으로 기초·응용을 이어서 연습' : '모드를 이동하면 VR에 다시 입장하세요.', 520, 455, 21, DIM);
     }
     if (s.technique) {
       this._button('plate-angle', `철판 기준 ${s.technique.plateAngle}° · 변경`, 42, 445, 450, 46);
       this._button('plate-offset', `철판 쪽 ${(s.technique.plateOffset * 1000).toFixed(0)} mm · 변경`, 520, 445, 460, 46);
-    } else this._text('오른손: 용접 · 왼손: 메뉴 / 그립으로 작업물 조절', 42, 487, 24, DIM);
+    } else this._text(s.unified ? '오른손 그립: 잡기 · 검지: 용접 / 왼손: 테이블 조작'
+      : '오른손: 용접 · 왼손: 메뉴 / 그립으로 작업물 조절', 42, 487, 24, DIM);
     const input = s.inputState;
     if (input) {
+      if (s.unified && !input.sessionActive) {
+        this._text('마우스: 시점·운봉 · 좌클릭 유지: 용접', 42, 523, 23, DIM);
+        this._text('방향키/WASD: 이동 · Q/E: 높이 · 휠: 용접건 앞뒤', 42, 557, 22, DIM);
+        this._text('F: 과제 보기 · Ctrl: 정밀 조작 · Esc: 마우스 해제', 42, 591, 22, DIM);
+        return;
+      }
       this._text(s.technique ? '각도·겨냥 거리 변경 시 현재 연습이 초기화됩니다.' : input.summary,
         42, 523, 23, s.technique ? DIM : input.rightTracked && input.leftTracked ? GREEN : '#ffd773');
       const right = input.rightTracked ? '위치 수신' : input.rightSource ? '위치 없음' : '입력 없음';
@@ -216,7 +226,8 @@ export class StatsBoard {
       this._text('오른손 컨트롤러: ' + right + ' / 왼손 컨트롤러: ' + left,
         42, 557, 22, DIM);
       this._text(s.mode === 'applied' ? '왼손 그립: 잡고 회전 / 왼쪽 스틱 위·아래: 작업대 높이'
-        : '작업물은 왼손 그립을 확실히 누른 동안만 움직입니다.', 42, 591, 22, DIM);
+        : s.unified ? '테이블 ◀ / ▶: 과제 · 왼쪽 스틱 위·아래: 높이'
+          : '작업물은 왼손 그립을 확실히 누른 동안만 움직입니다.', 42, 591, 22, DIM);
     }
   }
   _live() {

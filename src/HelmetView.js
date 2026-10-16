@@ -34,7 +34,7 @@ export class HelmetView {
     this.copyOrigin = new THREE.Vector2();
     this.filter.onBeforeRender = renderer => this.captureEye(renderer);
     window.addEventListener('keydown', e => {
-      if (e.code === 'KeyX' && !e.repeat) this.toggle();
+      if (e.code === 'KeyX' && !e.repeat && this.keyboardEnabled !== false) this.toggle();
     });
     renderer.xr.addEventListener('sessionstart', () => this.restoreCamera());
     renderer.xr.addEventListener('sessionend', () => {

@@ -3,50 +3,48 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>응용연습 — 현장 작업장 · 용접 포지셔너</title>
+  <title>용접 XR — 직선과 원형 용접 데모</title>
   <link rel="stylesheet" href="./style.css" />
-  <style>
-    #overlay { max-width: min(470px, calc(100vw - 68px)); max-height: calc(100vh - 130px); overflow-y: auto; }
-    #overlay h1 { font-size: 19px; }
-    #overlay details { margin-top: 10px; }
-    #overlay summary { cursor: pointer; color: #c4d5de; }
-    .field-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
-    .field-actions button, .field-actions a { background: #263642; color: #edf4f6; border: 1px solid #52646e; border-radius: 5px; padding: 8px 10px; cursor: pointer; text-decoration: none; font: inherit; }
-    #positioner-readout { color: #ffda79; font-size: 12px; }
-    #field-joint { background: #263642; color: #edf4f6; padding: 8px; border: 1px solid #52646e; border-radius: 5px; font: inherit; }
-    #loading-field { color: #ffda79; }
-  </style>
-  <script type="importmap">{"imports":{"three":"./vendor/three.module.js","three/addons/":"./vendor/addons/"}}</script>
+  <script type="importmap">
+    { "imports": { "three": "./vendor/three.module.js", "three/addons/": "./vendor/addons/" } }
+  </script>
 </head>
-<body data-mode="applied">
-  <div id="overlay">
-    <h1>응용연습 · 현장 용접 작업장</h1>
-    <p>가는 배관의 <b>옆면 접합부</b>와 <b>큰 파이프 곡면에 붙는 접합부</b> 둘레를 용접합니다. 포지셔너로 작업하기 편한 자세를 맞추세요.</p>
-    <p id="loading-field">현장 3D 모델을 불러오는 중…</p>
-    <div class="field-actions">
-      <select id="field-joint" aria-label="용접할 작은 배관 접합부"></select>
-      <button id="field-overview">작업장 전체 · 1</button>
-      <button id="field-closeup">작은 용접부 확대 · 2</button>
-      <button id="field-work">작업 위치 · 3</button>
-      <button id="field-home">포지셔너 원위치 · H</button>
-      <a href="./shop.html">기초연습</a>
+<body>
+  <main id="overlay" class="demo-panel">
+    <span class="demo-eyebrow">WELDING XR · INTERACTIVE DEMO</span>
+    <h1>용접, 이렇게 만들어집니다.</h1>
+    <p class="demo-intro">용접 과정을 보고, 직접 따라 해보세요.</p>
+    <div class="demo-tabs demo-modes" role="group" aria-label="웹 체험 방식">
+      <button type="button" data-web-mode="demo" aria-pressed="true">시연 보기</button>
+      <button type="button" data-web-mode="practice" aria-pressed="false">직접 해보기</button>
     </div>
-    <div id="positioner-readout"></div>
-    <details>
-      <summary>포지셔너와 용접 조작</summary>
-      <p><b>VR 포지셔너:</b> <b>왼손 그립을 누른 채 파이프를 잡고 돌리듯 손을 회전축 둘레로 움직이세요.</b> 손이 돌아간 각도만큼 수평 회전하고, 놓으면 고정됩니다. <b>오른손 트리거</b>로 용접하세요.</p>
-      <p><b>작업대 높이:</b> 왼손 그립을 놓고 <b>왼쪽 스틱 위·아래</b>로 조절합니다. 상판과 파이프가 함께 올라가고 내려갑니다.</p>
-      <p><b>전광판:</b> 왼쪽 포인터로 가리키고 <b>트리거를 누른 채 이동한 뒤 놓아 고정</b>하세요. 버튼은 짧게 누르면 선택됩니다.</p>
-      <p><b>PC 포지셔너:</b> I 반시계 · K 시계 · Shift 함께 누르면 미세 조절 · H 회전 원위치. Page Up / Page Down 작업대 높이.</p>
-      <p><b>용접부 선택:</b> 목록 또는 N/P로 다음·이전 접합부를 고릅니다. VR에서는 전광판 설정의 ‘다음 용접부 선택’을 누르세요. 다른 부위로 옮겨도 완성한 비드는 남습니다.</p>
-      <p><b>PC 용접:</b> W/S 진행 · A/D 이탈 · Q/E 아크 길이 · 방향키 각도 · Space 아크 · R 비드 초기화 · G 고스트 시연 · X 마스크.</p>
-      <p class="hint">용접 중에는 회전·높이 조절이 잠깁니다. 파이프 기울기는 고정되며, 작업대 높이는 회전 조작과 별도로 조절합니다.</p>
-    </details>
-    <p class="hint">작은 배관 외경 약 16 mm · 사진 기반 추정치. 평판과 동일한 비드·잔열·열변색 표현을 배관 크기에 맞춰 적용합니다.</p>
-    <div id="readout">준비 중</div>
-  </div>
+    <div class="demo-tabs" role="group" aria-label="용접 모양 선택">
+      <button type="button" data-demo="plate" aria-pressed="true"><span aria-hidden="true">━</span> 직선 용접</button>
+      <button type="button" data-demo="pipe" aria-pressed="false"><span aria-hidden="true">◯</span> 원형 용접</button>
+    </div>
+    <p id="task" class="hint">작업장을 준비하고 있습니다…</p>
+    <div class="demo-actions">
+      <button type="button" id="demo-play">▶ 시연 시작</button>
+      <button type="button" id="demo-replay">처음부터</button>
+    </div>
+    <progress id="demo-progress" max="1" value="0" aria-label="용접 시연 진행률"></progress>
+    <p id="readout" role="status">잠시만 기다려 주세요.</p>
+    <p id="demo-note" class="demo-note">시연 보기 · 원형은 VR과 같은 운봉 순서로 진행합니다.</p>
+    <div class="demo-view-controls">
+      <button type="button" id="demo-view-reset" title="F키로도 시점을 복귀할 수 있습니다">시점 복귀 <kbd>F</kbd></button>
+      <p id="demo-view-help">마우스 드래그로 회전 · 휠로 확대<br>방향키 / WASD 이동 · Q/E 높이 조절</p>
+    </div>
+  </main>
   <div id="result"></div>
   <div id="booterror"></div>
-  <script type="module" src="./pipe.js"></script>
+  <script type="module" src="./shop.js"></script>
+  <script>
+    setTimeout(function () {
+      if (document.querySelector('canvas')) return;
+      var el = document.getElementById('booterror');
+      el.textContent = '3D 작업장을 불러오지 못했습니다. 페이지를 새로고침해 주세요.';
+      el.style.display = 'block';
+    }, 5000);
+  </script>
 </body>
 </html>

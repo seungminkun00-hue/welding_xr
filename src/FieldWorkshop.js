@@ -1,8 +1,9 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+import { removeFieldEndPlate } from './FieldWorkpiece.js';
 
-export async function buildFieldWorkshop(scene, renderer) {
+export async function buildFieldWorkshop(scene, renderer, { environmentOnly = false } = {}) {
   const [gltf, response, hdr] = await Promise.all([
     new GLTFLoader().loadAsync('./assets/field-workshop/workshop.glb?v=adjustable-lift-4'),
     fetch('./assets/field-workshop/joint-layout.json?v=single-pbr-3'),
@@ -18,6 +19,7 @@ export async function buildFieldWorkshop(scene, renderer) {
     if (!node) throw new Error(`현장 모델에 ${name} 노드가 없습니다.`);
     return node;
   });
+  removeFieldEndPlate(nodes[3]);
   scene.add(root);
   scene.background = new THREE.Color(0x737872);
   scene.add(new THREE.HemisphereLight(0xecf1ff, 0x4c4436, 1.05));
@@ -78,5 +80,10 @@ export async function buildFieldWorkshop(scene, renderer) {
   }
   pmrem.dispose();
   const [yaw, tilt, roll, assembly, liftTop, liftMechanism] = nodes;
+  // Prepare the rig's materials before detaching it for a shared bench.
+  if (environmentOnly) {
+    root.getObjectByName('LiftTable')?.removeFromParent();
+    yaw.removeFromParent();
+  }
   return { root, yaw, tilt, roll, assembly, liftTop, liftMechanism, layout };
 }

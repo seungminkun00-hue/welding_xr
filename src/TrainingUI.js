@@ -6,10 +6,14 @@ export class TrainingUI {
     helmet, vrControls, getDemo = () => false, toggleDemo = null,
     supportsDemo = () => false, reset, selectStation = null,
     mode = 'basic', positioner = null, resetPositioner = null,
+    getMode = () => mode, selectMode = null,
     getJointLabel = () => null, nextJoint = null,
+    getHeldTool = () => null,
+    getInteraction = () => null,
     getTechnique = () => null, setTechnique = null }) {
     Object.assign(this, { renderer, camera, board, controllers, helmet, vrControls,
-      getDemo, toggleDemo, supportsDemo, reset, selectStation, physicalInput });
+      getDemo, toggleDemo, supportsDemo, reset, selectStation, physicalInput, getHeldTool, getInteraction });
+    this.getMode = getMode;
     this.guides = true;
     try {
       const saved = JSON.parse(localStorage.getItem(STORAGE) ?? '{}');
@@ -30,7 +34,8 @@ export class TrainingUI {
         controller.addEventListener(type, () => this.endBoardDrag(controller, true));
     }
     board.getSettings = () => ({
-      mode, positioner: positioner?.readout, jointLabel: getJointLabel(), hasNextJoint: !!nextJoint,
+      mode: getMode(), unified: !!selectMode,
+      positioner: positioner?.readout, jointLabel: getJointLabel(), hasNextJoint: !!nextJoint,
       guides: this.guides,
       inputStatus: physicalInput.status,
       inputState: this.inputState,
@@ -47,7 +52,10 @@ export class TrainingUI {
       if (technique && action === 'plate-offset') {
         setTechnique?.({ plateOffset: ((Math.round(technique.plateOffset * 1000) + 1) % 7) / 1000 });
       }
-      if ((action === 'applied' || action === 'basic') && action !== mode) {
+      if ((action === 'applied' || action === 'basic') && selectMode) {
+        selectMode(action); return;
+      }
+      if ((action === 'applied' || action === 'basic') && action !== getMode()) {
         const xrSession = renderer.xr.getSession();
         if (xrSession) await xrSession.end();
         location.assign(action === 'applied' ? './application.html' : './shop.html');
@@ -90,12 +98,13 @@ export class TrainingUI {
       return board.hit(this.raycaster);
     };
     canvas.addEventListener('pointerdown', event => {
-      if (renderer.xr.isPresenting || !hitAt(event)) return;
+      if (event.button !== 0 || document.pointerLockElement === canvas || renderer.xr.isPresenting || !hitAt(event)) return;
       down = { x: event.clientX, y: event.clientY };
       event.stopImmediatePropagation();
       event.preventDefault();
     }, true);
     canvas.addEventListener('pointerup', event => {
+      if (event.button !== 0 || document.pointerLockElement === canvas) return;
       const hit = renderer.xr.isPresenting ? null : hitAt(event);
       if (!down && !hit) return;
       event.stopImmediatePropagation();
@@ -104,9 +113,10 @@ export class TrainingUI {
       down = null;
     }, true);
     canvas.addEventListener('pointermove', event => {
-      if (!renderer.xr.isPresenting) board.hovered = hitAt(event)?.action ?? null;
+      if (!renderer.xr.isPresenting && document.pointerLockElement !== canvas) board.hovered = hitAt(event)?.action ?? null;
     });
     canvas.addEventListener('pointercancel', () => { down = null; });
+    document.addEventListener('pointerlockchange', () => { down = null; });
     renderer.xr.addEventListener('sessionend', () => {
       this.boardDrag = null;
       board.settingsOpen = false;
@@ -125,7 +135,7 @@ export class TrainingUI {
       sessionActive: !!session,
       rightSource: !!right.source, rightTracked: right.tracked,
       leftSource: !!left.source, leftTracked: left.tracked,
-      summary: !session ? 'Meta 컨트롤러 두 개를 사용하세요.'
+      summary: !session ? 'PC: 마우스로 시점·운봉 · 방향키 이동 · 좌클릭 용접'
         : right.tracked && left.tracked ? '양쪽 컨트롤러 위치 수신 중'
           : '추적 대기 · 컨트롤러가 다시 잡히면 버튼을 놓고 재입력하세요.',
     };
@@ -212,6 +222,23 @@ export class TrainingUI {
       if (hit) {
         this.board.hovered ??= hit.action;
       }
+      controller.userData.visuals?.update({
+        basicBench: this.vrControls.basicBench,
+        applied: this.getMode() === 'applied',
+        help: this.vrControls.helpVisible,
+        demo: this.getDemo(),
+        pointing: !!hit,
+        dragging: this.boardDrag?.controller === controller,
+        blocked: this.blocksManipulation,
+        welding: !!this.board.live?.welding,
+        toolHeld: this.vrControls.basicBench && this.physicalInput.right.userData.physicalGripDown,
+        finished: !!this.board.session?.finished,
+        heldTool: controller === this.physicalInput.right ? this.getHeldTool() : null,
+        needsArcBreak: !!this.board.session?.stats?.done &&
+          this.board.session?.plan?.current?.requireArcBreak !== false,
+        viewer: this.renderer.xr.getCamera(this.camera),
+        interaction: controller === this.physicalInput.left ? this.getInteraction() : null,
+      }, performance.now() / 1000);
     });
   }
 }

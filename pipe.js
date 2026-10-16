@@ -12,7 +12,8 @@ import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { pipeFilletSeam } from './src/SeamCurve.js';
 import { basicDownhillPlan } from './src/PassPlan.js';
-import { buildStickHolder, poseTorchByTip } from './src/Torches.js';
+import { poseTorchByTip } from './src/Torches.js';
+import { buildWeldingGun } from './src/WeldingGun.js';
 import { CurvedGuide } from './src/CurvedGuide.js';
 import { JointSession } from './src/JointSession.js';
 import { WeldBead, weldBeadOptions } from './src/WeldBead.js';
@@ -265,7 +266,7 @@ if (APPLIED && helmet) helmet.eyeOffset.copy(jointDefinitions[0].viewOffset);
  * asks the tip where it is and which way it faces rather than assuming the
  * handle axis.
  */
-const buildTorchMesh = buildStickHolder;
+const buildTorchMesh = buildWeldingGun;
 
 
 /** Place a torch so its NOZZLE TIP lands at `tipPos` aimed along `fwd`. */
@@ -277,10 +278,21 @@ const buildTorchMesh = buildStickHolder;
 const WELDING_HAND = 'right';
 
 const vrTorch = buildTorchMesh();
-const gripMarker = new THREE.Mesh(
-  new THREE.SphereGeometry(0.018, 16, 12),
-  new THREE.MeshStandardMaterial({ color: 0x47515f, metalness: 0.2, roughness: 0.8 })
-);
+let rodHeld = false;
+
+function holdGun(held) {
+  rodHeld = held;
+  if (held) {
+    rodController.add(vrTorch);
+    vrTorch.position.set(0, 0, 0); vrTorch.quaternion.identity();
+    rodController.userData.visuals.mountTool(vrTorch);
+  } else {
+    (field?.liftTop ?? workpiece).add(vrTorch);
+    vrTorch.position.copy(APPLIED ? new THREE.Vector3(0.34, 0.83, 0.25) : new THREE.Vector3(0.2, -0.20, 0.15));
+    vrTorch.rotation.set(0, 0, Math.PI / 2);
+    if (rodController) rodController.userData.trigger = false;
+  }
+}
 
 const physicalInput = new PhysicalControllers(scene, renderer);
 const controllers = physicalInput.controllers;
@@ -298,11 +310,15 @@ controllers.forEach((c) => {
   });
   c.addEventListener('squeezestart', () => {
     if (c.userData.source?.hand || demo || trainingUI.blocksManipulation) return;
-    if (APPLIED) {
+    if (c === rodController) holdGun(true);
+    else if (APPLIED) {
       if (c === gripController && !isArcOn() && !trainingUI.controllerHit(c)) positioner.begin(c);
     } else startDrag(c);
   });
-  c.addEventListener('squeezeend', () => { endDrag(c); positioner?.end(c); });
+  c.addEventListener('squeezeend', () => {
+    if (c === rodController && !demo) holdGun(false);
+    endDrag(c); positioner?.end(c);
+  });
   c.addEventListener('connected', (e) => {
     c.userData.source = e.data;
     c.userData.handedness = e.data?.handedness ?? null;
@@ -313,6 +329,7 @@ controllers.forEach((c) => {
     c.userData.uiPressed = false;
     c.userData.handedness = null;
     c.userData.trigger = false;
+    if (c === rodController) holdGun(false);
     endDrag(c);
     positioner?.end(c);
     assignHands();
@@ -325,8 +342,7 @@ let gripController = controllers[1];
 function assignHands() {
   rodController = physicalInput.right;
   gripController = physicalInput.left;
-  rodController.add(vrTorch);
-  gripController.add(gripMarker);
+  holdGun(rodHeld);
 }
 assignHands();
 
@@ -373,6 +389,7 @@ const trainingUI = new TrainingUI({
   scene, renderer, camera, board, controllers, physicalInput, weldingHand: WELDING_HAND,
   helmet, vrControls, getDemo: () => demo, toggleDemo,
   supportsDemo: () => true, reset: resetJoint,
+  getHeldTool: () => rodHeld && !demo ? vrTorch : null,
   mode: APPLIED ? 'applied' : 'basic', positioner, resetPositioner,
   getJointLabel: () => exercises[jointIndex].definition?.label,
   nextJoint: APPLIED ? () => selectJoint(jointIndex + 1) : null,
@@ -385,7 +402,10 @@ const trainingUI = new TrainingUI({
 });
 
 function toggleDemo() {
-  if (demo) { demoPlayer.stop(); demo = false; assignHands(); }
+  if (demo) {
+    demoPlayer.stop(); demo = false;
+    holdGun(!!rodController.userData.physicalGripDown && !rodController.userData.needsRelease);
+  }
   else demo = demoPlayer.start(renderer.xr.isPresenting ? vrTorch : null, scene);
   drag = null;
   positioner?.end();
@@ -414,6 +434,7 @@ window.addEventListener('keydown', (e) => {
 window.addEventListener('keyup', (e) => (keys[e.code] = false));
 window.addEventListener('blur', () => {
   for (const key of Object.keys(keys)) keys[key] = false;
+  if (!demo) holdGun(false);
   positioner?.end();
 });
 
@@ -430,6 +451,7 @@ renderer.xr.addEventListener('sessionstart', () => {
 });
 renderer.xr.addEventListener('sessionend', () => {
   if (demo) toggleDemo();
+  holdGun(false);
   controls.enabled = true;
   overlay.style.display = 'block';
   desktopTorch.visible = true;
@@ -603,7 +625,8 @@ function strokeStartP() {
 function isArcOn() {
   if (demo || positioner?.held || positioner?.moving || trainingUI.blocksArc(rodController)) return false;
   return renderer.xr.isPresenting
-    ? rodController.visible && rodController.userData.handedness === WELDING_HAND && rodController.userData.trigger
+    ? rodHeld && rodController.userData.physicalGripDown && rodController.visible &&
+      rodController.userData.handedness === WELDING_HAND && rodController.userData.trigger
     : !!keys['Space'];
 }
 
@@ -686,9 +709,9 @@ function animate(time, xrFrame) {
       session.lastT = null; session.speed = 0;
     }
   }
-  gripMarker.visible = gripController.visible;
-  vrTorch.visible = demo || (renderer.xr.isPresenting && !!rodController.userData.source
-    && !rodController.userData.source.hand && rodController.userData.handedness === WELDING_HAND);
+  vrTorch.visible = demo || (renderer.xr.isPresenting && (!rodHeld ||
+    (!!rodController.userData.source && !rodController.userData.source.hand &&
+      rodController.userData.handedness === WELDING_HAND)));
   if (demo) {
     demoPlayer.update(dt);
     board.demoStage = plan.sequential ? plan.strokes[demoPlayer.index].label : null;

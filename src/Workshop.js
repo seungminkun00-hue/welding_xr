@@ -21,7 +21,7 @@ function box(parent, dimensions, position, material) {
   return mesh;
 }
 
-export function perforatedBench(parent, { width = 0.8, depth = 0.6, top = -0.012, z = 0 } = {}) {
+export function perforatedBench(parent, { width = 0.8, depth = 0.6, top = -0.012, z = 0, adjustable = false } = {}) {
   const group = new THREE.Group();
   group.name = 'welding-bench';
   group.position.set(0, top, z);
@@ -43,15 +43,37 @@ export function perforatedBench(parent, { width = 0.8, depth = 0.6, top = -0.012
   group.add(plate);
   const frame = new THREE.MeshStandardMaterial({ color: 0x283c42, metalness: 0.65, roughness: 0.56 });
   const height = Math.max(0.5, parent.position.y + top - 0.02);
+  const legs = [];
   for (const x of [-width / 2 + 0.05, width / 2 - 0.05]) {
     for (const dz of [-depth / 2 + 0.05, depth / 2 - 0.05]) {
-      box(group, [0.04, height, 0.04], [x, -height / 2 - 0.02, dz], frame);
-      box(group, [0.065, 0.015, 0.065], [x, -height - 0.02, dz], frame);
+      if (adjustable) {
+        const sleeve = box(group, [0.055, 0.42, 0.055], [x, 0, dz], frame);
+        const shaft = box(group, [0.038, 1, 0.038], [x, 0, dz], frame);
+        const foot = box(group, [0.09, 0.02, 0.09], [x, 0, dz], frame);
+        legs.push({ sleeve, shaft, foot });
+      } else {
+        box(group, [0.04, height, 0.04], [x, -height / 2 - 0.02, dz], frame);
+        box(group, [0.065, 0.015, 0.065], [x, -height - 0.02, dz], frame);
+      }
     }
     box(group, [0.035, 0.07, depth - 0.07], [x, -0.055, 0], frame);
   }
   box(group, [width - 0.07, 0.07, 0.035], [0, -0.055, depth / 2 - 0.035], frame);
-  box(group, [width - 0.07, 0.035, 0.035], [0, -height * 0.7, -depth / 2 + 0.05], frame);
+  const brace = box(group, [width - 0.07, 0.035, 0.035], [0, -height * 0.7, -depth / 2 + 0.05], frame);
+  if (adjustable) {
+    group.userData.updateHeight = () => {
+      const surface = parent.position.y + top;
+      for (const { sleeve, shaft, foot } of legs) {
+        foot.position.y = 0.01 - surface;
+        sleeve.position.y = 0.23 - surface;
+        const extension = surface - 0.36;
+        shaft.scale.y = extension;
+        shaft.position.y = -0.02 - extension / 2;
+      }
+      brace.position.y = 0.24 - surface;
+    };
+    group.userData.updateHeight();
+  }
   return group;
 }
 

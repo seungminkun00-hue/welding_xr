@@ -3,14 +3,14 @@ import { SeamCurve } from './SeamCurve.js';
 import { pipeFilletPlan } from './PassPlan.js';
 
 // Both marked joints are perpendicular cylinder intersections, not a ring
-// around the large end flange. Authoring and runtime share joint-layout.json.
+// around the large pipe end. Authoring and runtime share joint-layout.json.
 export function fieldJointDefinitions(layout) {
   const { mainRadius: R, lineRadius: r, bossRadius: B, bossZ, elbowZ, lineY } = layout;
   return layout.lineX.flatMap((x, i) => {
     const prefix = layout.lineX.length === 1 ? '작은 배관' : `배관 ${String.fromCharCode(65 + i)}`;
     return [
       {
-        id: `line-${i}-side`, label: `${prefix} · 옆면 접합`, radius: r,
+        id: `line-${i}-side`, label: `${prefix} · 옆면 접합`, radius: r, startLabel: '위쪽',
         center: new THREE.Vector3(x, lineY, bossZ - B),
         viewOffset: new THREE.Vector3(-0.09, 0.11, -0.19),
         sample(u) {
@@ -35,11 +35,12 @@ export function fieldJointDefinitions(layout) {
         },
       },
       {
-        id: `line-${i}-base`, label: `${prefix} · 곡면 접합`, radius: r,
+        id: `line-${i}-base`, label: `${prefix} · 곡면 접합`, radius: r, startLabel: '바깥쪽',
         center: new THREE.Vector3(x, Math.sqrt(R * R - x * x), elbowZ),
-        viewOffset: new THREE.Vector3(-0.08, 0.17, 0.14),
+        viewOffset: new THREE.Vector3(-0.08, 0.17, -0.14),
         sample(u) {
-          const a = u * Math.PI * 2, dx = r * Math.cos(a), dz = r * Math.sin(a);
+          // Start on the exposed end of the elbow, away from the long tube.
+          const a = u * Math.PI * 2, dx = r * Math.sin(a), dz = -r * Math.cos(a);
           const y = Math.sqrt(R * R - (x + dx) ** 2);
           return {
             position: new THREE.Vector3(x + dx, y, elbowZ + dz),
@@ -68,6 +69,7 @@ export function createFieldSeam(definition) {
   }, { closed: true, resolution: 320 });
   seam.center = definition.center.clone();
   seam.radius = definition.radius;
+  seam.startLabel = definition.startLabel;
   seam.clockAt = t => THREE.MathUtils.euclideanModulo(t, 1) * 12;
   // Attach a surface projector for the shared bead and heat-tint renderers.
   // Its t is arc length, so obtain the host normal from the actual seam point.
@@ -91,10 +93,12 @@ export function createFieldSeam(definition) {
 }
 
 export function smallJointPlan(seam) {
-  const plan = pipeFilletPlan(seam);
+  // An accessible start for this exercise, shared by the guide and replay.
+  const plan = pipeFilletPlan(seam, { uphill: false });
+  plan.activeGuideOnly = true;
   for (let i = 0; i < plan.strokes.length; i++) {
     const stroke = plan.strokes[i];
-    stroke.label = `${i + 1}획 · 작은 접합부 ${i === 0 ? '첫 번째' : '반대쪽'} 반원`;
+    stroke.label = `${i + 1}획 · ${seam.startLabel} 시작 · ${i === 0 ? '첫 번째' : '반대쪽'} 반원`;
     stroke.tieIn = { lead: i ? 0.001 : 0, trail: 0.001 };
     stroke.profile = {
       speed: [[0, 0.002], [1, 0.002]],

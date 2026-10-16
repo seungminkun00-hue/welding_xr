@@ -1,6 +1,6 @@
 import { buildWorkshop, perforatedBench, plateFixtures } from './src/Workshop.js';
 import { steelMaterialPBR } from './src/SteelTextures.js';
-import { buildMigTorch } from './src/Torches.js';
+import { buildMigTorch, setTorchControllerMounted } from './src/Torches.js';
 import { WorkpieceGrab } from './src/Stability.js';
 import { VRControls } from './src/VRControls.js';
 import { TrainingUI } from './src/TrainingUI.js';
@@ -167,11 +167,7 @@ const buildTorchMesh = () => buildMigTorch(TORCH_LENGTH);
 // Right physical controller welds; left physical controller moves the bench.
 const WELDING_HAND = 'right';
 
-const vrTorch = buildTorchMesh();
-const gripMarker = new THREE.Mesh(
-  new THREE.SphereGeometry(0.018, 16, 12),
-  new THREE.MeshStandardMaterial({ color: 0x47515f, metalness: 0.2, roughness: 0.8 })
-);
+const vrTorch = setTorchControllerMounted(buildTorchMesh());
 
 const physicalInput = new PhysicalControllers(scene, renderer);
 const controllers = physicalInput.controllers;
@@ -213,7 +209,6 @@ function assignHands() {
   torchController = physicalInput.right;
   gripController = physicalInput.left;
   torchController.add(vrTorch);
-  gripController.add(gripMarker);
 }
 assignHands();
 
@@ -409,7 +404,6 @@ function animate(time, xrFrame) {
   physicalInput.update(xrFrame, dt);
 
   trainingUI.update(xrFrame);
-  gripMarker.visible = gripController.visible;
   vrTorch.visible = renderer.xr.isPresenting && !!torchController.userData.source
     && !torchController.userData.source.hand && torchController.userData.handedness === WELDING_HAND;
   guide.setVisible(trainingUI.guides);

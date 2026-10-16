@@ -1,8 +1,8 @@
 import * as THREE from 'three';
 
 export class VRControls {
-  constructor(scene, renderer, workpiece, { weldingHand = 'right', onDemo = null, applied = false } = {}) {
-    Object.assign(this, { renderer, workpiece, weldingHand, onDemo, applied });
+  constructor(scene, renderer, workpiece, { weldingHand = 'right', onDemo = null, applied = false, basicBench = false } = {}) {
+    Object.assign(this, { renderer, workpiece, weldingHand, onDemo, applied, basicBench });
     this.down = { y: false, b: false };
     this.helpVisible = false;
     this.canvas = document.createElement('canvas');
@@ -35,11 +35,18 @@ export class VRControls {
     const torch = this.weldingHand === 'left' ? '왼손' : '오른손';
     const free = this.weldingHand === 'left' ? '오른손' : '왼손';
     const lines = this.applied ? [
-      '오른손 트리거 : 용접 아크',
+      '오른손 그립 : 용접건 잡기 / 검지 트리거 : 용접',
       '왼손 그립 : 잡은 채 축 둘레를 따라 수평 회전',
       '왼쪽 스틱 위·아래 : 작업대 높이 조절',
       '전광판 : 왼쪽 트리거를 누른 채 이동',
-      '놓으면 고정 / 전광판 버튼은 짧게 클릭',
+      this.basicBench ? '테이블 ◀ / ▶ : 기초부터 응용까지 과제 전환' : '놓으면 고정 / 전광판 버튼은 짧게 클릭',
+      '왼손 X : 마스크 / Y : 시연 / 오른손 B : 안내',
+    ] : this.basicBench ? [
+      `${torch} 그립 : 용접건 잡기 / 검지 트리거 : 용접`,
+      '트리거 놓기 : 아크 정지 / 그립 놓기 : 내려놓기',
+      '테이블 ◀ / ▶ : 기초부터 응용까지 과제 전환',
+      '테이블 ▲ / ▼ 또는 왼쪽 스틱 : 높이 조절',
+      '전광판 : 왼쪽 트리거로 잡고 이동 / 놓아 고정',
       '왼손 X : 마스크 / Y : 시연 / 오른손 B : 안내',
     ] : [
       `${torch} 컨트롤러 : 운봉 / 트리거 : 아크`,

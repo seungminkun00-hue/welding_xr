@@ -420,21 +420,7 @@ for z in [-.31,.27]:
     center=(max(LAYOUT['lineX'])+min(LAYOUT['lineX']))/2
     box('Small line retaining bridge',(width,.01,.016),(center,lineY+.008,z),darksteel,assembly)
 for z in [-.59,.59]: tube('Machined tube collar',.0715,.003,.022,(0,0,z),pipeSteel,assembly)
-# Square end flange is background hardware, not a training weld target.
-verts=[]; faces=[]; n=64
-for z in [.681,.695]:
-    for outer in [False,True]:
-        for i in range(n):
-            a=i*2*math.pi/n; r=.07 if not outer else .116/max(abs(math.cos(a)),abs(math.sin(a)))
-            verts.append(tuple(v((r*math.cos(a),r*math.sin(a),z))))
-for i in range(n):
-    j=(i+1)%n
-    faces += [(i,j,n+j,n+i),(2*n+j,2*n+i,3*n+i,3*n+j),(n+i,n+j,3*n+j,3*n+i),(j,i,2*n+i,2*n+j)]
-mesh=bpy.data.meshes.new('Open square flange'); mesh.from_pydata(verts,[],faces); mesh.update()
-o=bpy.data.objects.new('Square flange',mesh); bpy.context.collection.objects.link(o); o.parent=assembly; mesh.materials.append(darksteel)
-for x in [-.093,.093]:
-    for y in [-.093,.093]:
-        tube('Flange bolt recess',.007,.002,.001,(x,y,.696),black,assembly,(0,0,1),12)
+# Keep the pipe end open and clear of the former square plate and its bolts.
 tube('Rear transverse pin eye',.055,.022,.21,(0,0,-.77),darksteel,assembly,(1,0,0),40)
 box('Rear hydraulic manifold',(.125,.09,.055),(0,.04,-.735),steel,assembly)
 for x in [-.031,.031]: tube('Open manifold port',.019,.007,.009,(x,.087,-.74),black,assembly,(0,1,0),24)

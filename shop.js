@@ -1,11 +1,16 @@
 import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { WebWeldingDemo } from './src/WebWeldingDemo.js';
 
-import { buildWorkshop, perforatedBench, plateFixtures } from './src/Workshop.js';
+import { perforatedBench, plateFixtures } from './src/Workshop.js';
+import { buildFieldWorkshop } from './src/FieldWorkshop.js';
+import { fieldJointDefinitions, createFieldSeam, smallJointPlan } from './src/FieldJoints.js';
+import { Positioner } from './src/Positioner.js';
+import { BasicBenchControls } from './src/BasicBenchControls.js';
 import { steelMaterialPBR } from './src/SteelTextures.js';
-import { buildMigTorch, buildStickHolder, poseTorchByTip } from './src/Torches.js';
-import { WorkpieceGrab } from './src/Stability.js';
+import { poseTorchByTip } from './src/Torches.js';
+import { buildWeldingGun, updateGunTrigger } from './src/WeldingGun.js';
 import { VRControls } from './src/VRControls.js';
 import { TrainingUI } from './src/TrainingUI.js';
 import { PhysicalControllers } from './src/PhysicalControllers.js';
@@ -28,16 +33,8 @@ import { TorchHud } from './src/TorchHud.js';
 import { StatsBoard } from './src/StatsBoard.js';
 
 // ---------------------------------------------------------------------------
-// One bench, both exercises.
-//
-// Previously the flat butt joint and the pipe fillet were separate pages, so
-// changing task meant a page load -- which in a headset drops the XR session
-// and makes you take the thing off and start again. Here both pieces sit on
-// one bench and the free hand points at whichever one you want. Nothing
-// reloads, so the session survives the switch.
-//
-// All basic entry pages load this workshop. The old pipe URL only selects
-// the initial exercise; both workpieces and both selectors remain available.
+// One centered exercise at a time. Switching preserves each exercise's bead
+// and the XR session; the held tool follows the selected task automatically.
 // ---------------------------------------------------------------------------
 
 const BENCH_HEIGHT = 0.9;
@@ -49,7 +46,6 @@ const PLATE_LENGTH = 0.34;
 const PLATE_THICKNESS = 0.012;
 const ROOT_GAP = 0.002;
 const SEAM_LENGTH = 0.24;
-const TORCH_LENGTH = 0.15;
 
 // Pipe fillet, same dimensions as pipe.html.
 const BLOCK = 0.17;
@@ -61,25 +57,26 @@ const PIPE_OUTER = 0.0335;
 const PIPE_WALL = 0.004;
 const PIPE_LENGTH = 0.085;
 
-const TILT_SPEED = 40;
 const TILT_LIMIT = 55;
+let webDemo = null;
 
 // ---------------------------------------------------------------------------
 // Renderer, scene, camera
 // ---------------------------------------------------------------------------
 const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.xr.enabled = true;
 renderer.xr.cameraAutoUpdate = false;
 renderer.xr.setReferenceSpaceType('local-floor');
-renderer.xr.setFramebufferScaleFactor(0.85);
+renderer.xr.setFramebufferScaleFactor(0.70);
 renderer.xr.setFoveation(1);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 0.95;
 document.body.appendChild(renderer.domElement);
-document.body.appendChild(VRButton.createButton(renderer));
+const loading = document.getElementById('task');
+if (loading) loading.textContent = '현장 작업장을 불러오는 중…';
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0a0d13);
@@ -89,7 +86,13 @@ camera.position.set(0.1, 1.42, BENCH_Z + 0.78);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, BENCH_HEIGHT + 0.08, BENCH_Z);
-controls.enableDamping = true;
+controls.enableDamping = false;
+controls.enableRotate = controls.enablePan = controls.enableZoom = true;
+controls.rotateSpeed = 0.65;
+controls.zoomSpeed = 0.65;
+controls.panSpeed = 0.7;
+// Desktop viewing is enabled after the presentation is ready; XR owns its camera.
+controls.enabled = false;
 controls.minDistance = 0.2;
 controls.maxDistance = 3.0;
 controls.update();
@@ -98,13 +101,10 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  if (!renderer.xr.isPresenting) webDemo?.layoutCamera();
 });
 
-scene.add(new THREE.HemisphereLight(0x9fc0e0, 0x14161c, 0.18));
-const keyLight = new THREE.DirectionalLight(0xffffff, 0.45);
-keyLight.position.set(0.8, 2, 0.9);
-scene.add(keyLight);
-buildWorkshop(scene, renderer);
+const field = await buildFieldWorkshop(scene, renderer, { environmentOnly: true });
 
 // ---------------------------------------------------------------------------
 // The bench everything stands on
@@ -113,8 +113,21 @@ const shop = new THREE.Group();
 shop.position.set(0, BENCH_HEIGHT, BENCH_Z);
 scene.add(shop);
 
-// Wide enough that the two pieces are a head-turn apart rather than touching.
-perforatedBench(shop, { width: 1.18, depth: 0.62, top: -PLATE_THICKNESS, z: 0 });
+const bench = perforatedBench(shop, {
+  width: 1.38, depth: 0.72, top: -PLATE_THICKNESS, z: 0, adjustable: true,
+});
+const appliedRig = new THREE.Group();
+appliedRig.name = 'applied-positioner-on-shared-bench';
+shop.add(appliedRig);
+appliedRig.add(field.yaw);
+field.yaw.position.set(0, 0.43, -0.08);
+const pedestalMaterial = new THREE.MeshStandardMaterial({ color: 0x303c42, metalness: 0.75, roughness: 0.4 });
+const pedestal = new THREE.Mesh(new THREE.CylinderGeometry(0.065, 0.08, 0.34, 24), pedestalMaterial);
+pedestal.position.set(0, 0.17, -0.08); appliedRig.add(pedestal);
+const base = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.025, 0.24), pedestalMaterial);
+base.position.set(0, 0, -0.08); appliedRig.add(base);
+// The shared motion table owns height. This positioner only rotates the jig.
+const positioner = new Positioner({ yaw: field.yaw, tilt: field.tilt, roll: field.roll });
 
 // ---------------------------------------------------------------------------
 // Station: flat butt joint (MIG, 1G)
@@ -122,7 +135,7 @@ perforatedBench(shop, { width: 1.18, depth: 0.62, top: -PLATE_THICKNESS, z: 0 })
 function buildPlateStation() {
   const group = new THREE.Group();
   group.name = 'station-plate';
-  group.position.set(-0.27, 0, 0);
+  group.position.set(0, 0, 0);
   shop.add(group);
 
   const face = steelMaterialPBR('rolledSheet', {
@@ -157,7 +170,7 @@ function buildPlateStation() {
   });
   const poseGuide = new PoseGuide(group, seam);
 
-  const desktopTorch = buildMigTorch(TORCH_LENGTH);
+  const desktopTorch = buildWeldingGun();
   poseGuide?.useTorch(desktopTorch);
   group.add(desktopTorch);
 
@@ -168,7 +181,6 @@ function buildPlateStation() {
     workAngle: 0,
   };
 
-  const TRAVEL_SPEED = 0.011, LATERAL_SPEED = 0.02, STANDOFF_SPEED = 0.02, BOOST = 6;
   const _f = new THREE.Vector3();
 
   const forward = (target) => target
@@ -189,24 +201,12 @@ function buildPlateStation() {
     hint: 'MIG · 1G 기초연습',
     group, picks, seam, guide, bead, session, poseGuide,
     desktop, desktopTorch,
-    vrTorch: buildMigTorch(TORCH_LENGTH),
+    vrTorch: buildWeldingGun(),
     usesBoard: true,
     // The recorded master trajectory is available for the pipe exercise.
     supportsDemo: false,
 
-    updateDesktop(dt, keys) {
-      const boost = keys['ShiftLeft'] || keys['ShiftRight'] ? BOOST : 1;
-      if (keys['KeyW']) desktop.travel += TRAVEL_SPEED * boost * dt;
-      if (keys['KeyS']) desktop.travel -= TRAVEL_SPEED * boost * dt;
-      if (keys['KeyD']) desktop.lateral += LATERAL_SPEED * dt;
-      if (keys['KeyA']) desktop.lateral -= LATERAL_SPEED * dt;
-      if (keys['KeyQ']) desktop.height += STANDOFF_SPEED * dt;
-      if (keys['KeyE']) desktop.height -= STANDOFF_SPEED * dt;
-      if (keys['ArrowUp']) desktop.travelAngle += TILT_SPEED * dt;
-      if (keys['ArrowDown']) desktop.travelAngle -= TILT_SPEED * dt;
-      if (keys['ArrowRight']) desktop.workAngle += TILT_SPEED * dt;
-      if (keys['ArrowLeft']) desktop.workAngle -= TILT_SPEED * dt;
-
+    updateDesktop() {
       desktop.travel = THREE.MathUtils.clamp(desktop.travel, -0.03, SEAM_LENGTH + 0.03);
       desktop.lateral = THREE.MathUtils.clamp(desktop.lateral, -0.05, 0.05);
       desktop.height = THREE.MathUtils.clamp(desktop.height, 0.001, 0.08);
@@ -292,11 +292,18 @@ function buildPlateStation() {
 // ---------------------------------------------------------------------------
 // Station: pipe-to-plate fillet (SMAW, all positions)
 // ---------------------------------------------------------------------------
-function buildPipeStation() {
-  const group = new THREE.Group();
-  group.name = 'station-pipe';
+function buildPipeStation(definition = null) {
+  const applied = !!definition;
+  const group = applied ? field.assembly.clone(true) : new THREE.Group();
+  group.name = applied ? definition.id : 'station-pipe';
+  let picks;
+  if (applied) {
+    field.roll.add(group);
+    picks = [];
+    group.traverse(object => { if (object.isMesh) picks.push(object); });
+  } else {
   // Lift it so the fixture's own table line lands on the bench top.
-  group.position.set(0.3, -PIPE_TABLE_TOP, 0);
+  group.position.set(0, -PIPE_TABLE_TOP, 0);
   shop.add(group);
 
   const CIRC = 2 * Math.PI * PIPE_OUTER;
@@ -341,8 +348,10 @@ function buildPipeStation() {
   );
   rim.position.set(0, 0, PIPE_LENGTH);
   group.add(rim);
+  picks = [pipe, rim, block];
+  }
 
-  const seam = pipeFilletSeam({
+  const seam = applied ? createFieldSeam(definition) : pipeFilletSeam({
     center: new THREE.Vector3(0, 0, 0),
     wallNormal: new THREE.Vector3(0, 0, 1),
     up: new THREE.Vector3(0, 1, 0),
@@ -350,25 +359,33 @@ function buildPipeStation() {
     plateAim: true,
   });
 
-  const plan = basicDownhillPlan(seam);
-  const guide = new CurvedGuide(group, seam, plan, { zoneHalfWidth: 0.0055 });
-  const bead = new WeldBead(group, seam, { ...weldBeadOptions({ scale: 0.68, segments: 320 }), gravity: true });
+  const plan = applied ? smallJointPlan(seam) : basicDownhillPlan(seam);
+  const guide = new CurvedGuide(group, seam, plan, {
+    depthTest: applied,
+    zoneHalfWidth: applied ? 0.0022 : 0.0055, segments: applied ? 64 : 160,
+    ringRadius: applied ? 0.0024 : 0.006,
+  });
+  const bead = new WeldBead(group, seam, {
+    ...weldBeadOptions({ scale: applied ? 0.32 : 0.68, segments: applied ? 192 : 320 }),
+    gravity: !applied, sparkCount: applied ? 80 : 160,
+  });
   const session = new JointSession(seam, plan, {
-    standoffTol: 0.0024, lateralTol: 0.0035, angleTol: 22, speedTol: 0.0018,
+    standoffTol: applied ? 0.0012 : 0.0024, lateralTol: applied ? 0.0015 : 0.0035,
+    angleTol: 22, speedTol: applied ? 0.0012 : 0.0018,
     workpiece: group,
   });
   const poseGuide = new PoseGuide(group, seam);
+  if (applied) { poseGuide.ring.scale.setScalar(0.4); poseGuide.travel.setLength(0.015, 0.004, 0.002); }
 
-  const desktopTorch = buildStickHolder();
+  const desktopTorch = buildWeldingGun();
   poseGuide?.useTorch(desktopTorch);
   const demoPlayer = new MasterDemo(seam, plan, poseGuide);
   group.add(desktopTorch);
 
-  const desktop = { p: 0, lateral: plan.current.lateralAt(0, seam.length), height: 0.0028,
+  const desktop = { p: 0, lateral: plan.current.lateralAt(0, seam.length), height: applied ? 0.002 : 0.0028,
     travelAngle: plan.current.sample(0).travelAngle, workAngle: plan.current.sample(0).workAngle };
   let lastStrokeIndex = 0;
 
-  const TRAVEL_SPEED = 0.0030, LATERAL_SPEED = 0.008, STANDOFF_SPEED = 0.008, BOOST = 8;
   const _frame = { travel: new THREE.Vector3(), normal: new THREE.Vector3(), lateral: new THREE.Vector3() };
   const _f = new THREE.Vector3();
 
@@ -396,36 +413,20 @@ function buildPipeStation() {
   };
 
   return {
-    id: 'pipe',
-    title: '파이프 원주 필릿',
-    hint: '하진 궤적 · 오버랩 · 마무리 편도 4회',
+    id: applied ? definition.id : 'pipe',
+    applied,
+    viewOffset: definition?.viewOffset,
+    title: applied ? `응용 · ${definition.label}` : '기초 · 파이프 원주 필릿',
+    hint: applied ? `${definition.startLabel} 시작 · 왼손 그립으로 포지셔너 회전` : '하진 궤적 · 오버랩 · 마무리 편도 4회',
     group,
-    picks: [pipe, rim, block],
+    picks,
     seam, guide, bead, session, poseGuide, demoPlayer,
     desktop, desktopTorch,
-    vrTorch: buildStickHolder(),
+    vrTorch: buildWeldingGun(),
     usesBoard: true,
     supportsDemo: true,
 
-    updateDesktop(dt, keys) {
-      const stroke = activeStroke();
-      const strokeLength = stroke.span * seam.length;
-
-      {
-      const boost = keys['ShiftLeft'] || keys['ShiftRight'] ? BOOST : 1;
-      const step = ((TRAVEL_SPEED * boost) / strokeLength) * dt;
-      if (keys['KeyW']) desktop.p += step;
-      if (keys['KeyS']) desktop.p -= step;
-      if (keys['KeyD']) desktop.lateral += LATERAL_SPEED * dt;
-      if (keys['KeyA']) desktop.lateral -= LATERAL_SPEED * dt;
-      if (keys['KeyQ']) desktop.height += STANDOFF_SPEED * dt;
-      if (keys['KeyE']) desktop.height -= STANDOFF_SPEED * dt;
-      if (keys['ArrowUp']) desktop.travelAngle += TILT_SPEED * dt;
-      if (keys['ArrowDown']) desktop.travelAngle -= TILT_SPEED * dt;
-      if (keys['ArrowRight']) desktop.workAngle += TILT_SPEED * dt;
-      if (keys['ArrowLeft']) desktop.workAngle -= TILT_SPEED * dt;
-      }
-
+    updateDesktop() {
       desktop.p = THREE.MathUtils.clamp(desktop.p, -0.12, 1.08);
       desktop.lateral = THREE.MathUtils.clamp(desktop.lateral, -0.02, 0.02);
       desktop.height = THREE.MathUtils.clamp(desktop.height, 0.0005, 0.05);
@@ -518,7 +519,7 @@ function buildPipeStation() {
          <p class="hint">아크길이 ${s.arc}% · 중앙 ${s.center}% · 속도 ${s.speed}% ·
          작업각 ${s.work}% · 이음부 ${s.tieIn}% · 진행방향 ${s.direction}%</p>`
       ).join('');
-      return `<h2>파이프 필릿 · ${r.total}점</h2>${rows}
+      return `<h2>${applied ? definition.label : '파이프 필릿'} · ${r.total}점</h2>${rows}
         <div class="bar"><span>비드 적층률</span><b>${r.coverage}%</b></div>
         ${r.physics ? `<p class="hint">모델 지표(0~100): 용입 ${r.physics.penetration} · 흘러내림 ${r.physics.runoff} · 융합불량 ${r.physics.fusionRisk} · 슬래그 ${r.physics.slagRisk} — 실제 결함 판정 아님</p>` : ''}
         <p class="hint">아크 시간 ${r.arcTime.toFixed(1)}초 · R 키로 다시 시도</p>`;
@@ -530,7 +531,7 @@ function buildPipeStation() {
       poseGuide?.reset();
       desktop.p = strokeStartP();
       desktop.lateral = activeStroke().lateralAt(0, seam.length);
-      desktop.height = 0.0028;
+      desktop.height = applied ? 0.002 : 0.0028;
       desktop.travelAngle = activeStroke().sample(0).travelAngle;
       desktop.workAngle = activeStroke().sample(0).workAngle;
       lastStrokeIndex = 0;
@@ -547,15 +548,18 @@ const WELDING_HAND = 'right';
 
 const plateStation = buildPlateStation();
 const pipeStation = buildPipeStation();
-const stations = [plateStation, pipeStation];
+const appliedStations = fieldJointDefinitions(field.layout).map(buildPipeStation);
+field.assembly.removeFromParent();
+const stations = [plateStation, pipeStation, ...appliedStations];
 const requestedExercise = new URLSearchParams(location.search).get('exercise');
-let active = (requestedExercise === 'pipe' ||
-  (!requestedExercise && location.pathname.endsWith('/pipe.html'))) ? pipeStation : plateStation;
+let active = stations.find(station => station.id === requestedExercise) ??
+  (requestedExercise === 'applied' || (!requestedExercise && location.pathname.endsWith('/application.html'))
+    ? appliedStations[0] : !requestedExercise && location.pathname.endsWith('/pipe.html') ? pipeStation : plateStation);
 
 
 const hud = new TorchHud(scene, { width: 0.1, offset: 0.075 });
 const board = new StatsBoard(scene, {
-  occluders: [...plateStation.picks, ...pipeStation.picks],
+  occluders: stations.flatMap(station => station.picks),
   follow: shop,
   width: 0.66,
   position: new THREE.Vector3(0.15, BENCH_HEIGHT + 0.70, BENCH_Z - 0.24),
@@ -565,6 +569,10 @@ const helmet = visualFeatures
   : null;
 
 const picker = new StationPicker(shop, stations);
+const benchControls = new BasicBenchControls(shop, bench, {
+  onStep: direction => selectStation(stations[
+    (stations.indexOf(active) + direction + stations.length) % stations.length]),
+});
 
 // The control sheet lives in here rather than in the page overlay.
 const drawer = new BenchDrawer(shop, {
@@ -575,6 +583,7 @@ let drawerHover = null;
 
 // Master replay has a separate cursor and never drives the real torch.
 let demo = false;
+let welding = false;
 
 function toggleDemo() {
   if (!active.supportsDemo) return;
@@ -585,7 +594,8 @@ function toggleDemo() {
       holdRod(!!torchController.userData.source?.gamepad?.buttons[1]?.pressed);
   }
   else demo = active.demoPlayer.start(renderer.xr.isPresenting ? active.vrTorch : null, scene);
-  benchDrag = null;
+  welding = false;
+  benchControls.stop();
   active.session.lastT = null;
   active.session.speed = 0;
   for (const c of controllers) c.userData.trigger = false;
@@ -593,8 +603,11 @@ function toggleDemo() {
 }
 
 function syncTorchVisibility() {
+  const web = !!webDemo && !renderer.xr.isPresenting;
+  appliedRig.visible = !web && !!active.applied;
   for (const s of stations) {
-    s.desktopTorch.visible = s === active && !renderer.xr.isPresenting;
+    s.group.visible = !web && s === active;
+    s.desktopTorch.visible = !web && s === active && !renderer.xr.isPresenting;
     s.vrTorch.visible = s === active && renderer.xr.isPresenting;
   }
 }
@@ -602,11 +615,6 @@ function syncTorchVisibility() {
 // ---------------------------------------------------------------------------
 // VR controllers
 // ---------------------------------------------------------------------------
-const gripMarker = new THREE.Mesh(
-  new THREE.SphereGeometry(0.018, 16, 12),
-  new THREE.MeshStandardMaterial({ color: 0x47515f, metalness: 0.2, roughness: 0.8 })
-);
-
 // Where the rod lies when nobody is holding it: on the bench, in front, near
 // the drawer, so it is obvious what to pick up and where it went.
 const ROD_REST_POS = new THREE.Vector3(-0.02, 0.012, 0.235);
@@ -616,18 +624,19 @@ let rodHeld = false;
 /**
  * Put the rod in the hand, or back on the bench.
  *
- * Splitting "hold" from "strike" is the point: on a real holder your hand is
- * already closed round it long before the arc goes, and making the trigger
- * alone strike meant you could weld with the rod nowhere near your grip.
+ * Grip equips the CAD gun. The physical index trigger controls its arc.
  */
 function holdRod(held) {
   rodHeld = held;
+  if (!held) welding = false;
   const rod = active.vrTorch;
   if (held) {
     torchController.add(rod);
     rod.position.set(0, 0, 0);
     rod.quaternion.identity();
+    torchController.userData.visuals.mountTool(rod);
   } else {
+    updateGunTrigger(rod, 0, false, 0);
     shop.add(rod);
     rod.position.copy(ROD_REST_POS);
     rod.quaternion.setFromEuler(ROD_REST_ROT);
@@ -653,8 +662,8 @@ controllers.forEach((c) => {
       const hit = drawer.classify(aim.intersectObjects(drawer.picks, true)[0]?.object);
       if (hit) drawer.activate(hit);
       else {
-        const station = picker.pick(aim);
-        if (station) selectStation(station);
+        benchControls.activate(benchControls.pick(aim), welding || trainingUI.blocksManipulation,
+          rodHeld || trainingUI.blocksManipulation);
       }
     }
   });
@@ -665,16 +674,14 @@ controllers.forEach((c) => {
   c.addEventListener('squeezestart', () => {
     if (c.userData.source?.hand || !c.userData.source || demo || trainingUI.blocksManipulation) return;
     c.userData.grip = true;
-    // Welding hand: the lower button is your hand closing round the holder.
-    // Free hand: it is still the bench drag it always was.
     if (c === torchController) holdRod(true);
-    else startBenchDrag(c);
+    else if (active.applied && !isArcOn()) positioner.begin(c);
   });
-  c.addEventListener('squeezeend', event => {
+  c.addEventListener('squeezeend', () => {
     if (c.userData.source?.hand || demo) return;
     c.userData.grip = false;
-    if (c === torchController && !event.cancelled) holdRod(false);
-    else endBenchDrag(c);
+    if (c === torchController) holdRod(false);
+    else positioner.end(c);
   });
   c.addEventListener('connected', (event) => {
     c.userData.source = event.data;
@@ -688,7 +695,6 @@ controllers.forEach((c) => {
     c.userData.trigger = false;
     c.userData.grip = false;
     if (c === torchController) holdRod(false);
-    endBenchDrag(c);
     assignHands();
   });
 });
@@ -699,59 +705,70 @@ let gripController = controllers[1];
 function assignHands() {
   torchController = physicalInput.right;
   gripController = physicalInput.left;
-  gripController.add(gripMarker);
   holdRod(rodHeld);
 }
 assignHands();
-
-let benchDrag = null;
-
-function startBenchDrag(controller) {
-  if (controller !== gripController || controller.userData.source?.hand || !controller.userData.source || demo || trainingUI.blocksManipulation || isArcOn()) return;
-  if (!controller.userData.tracked) return;
-  benchDrag = new WorkpieceGrab(controller, shop, 0.55, 1.35);
-}
-function endBenchDrag(controller) {
-  if (benchDrag && benchDrag.controller === controller) benchDrag = null;
-}
-function updateBenchDrag(dt) {
-  if (!benchDrag) return;
-  if (isArcOn() || trainingUI.blocksManipulation || !benchDrag.update(dt)) benchDrag = null;
-}
 
 // ---------------------------------------------------------------------------
 // Switching
 // ---------------------------------------------------------------------------
 function selectStation(station) {
-  if (station === active) return;
-  if (isArcOn()) return;
+  if (!station || station === active || welding) return;
   // A replay belongs to the piece it was recorded on; carrying the flag across
   // would leave the other station with no torch and no way to get one back.
   if (demo) toggleDemo();
-  // Leave the finished weld on the piece you walked away from. Coming back to
-  // see your own bead is half the point of having both on one bench.
+  positioner.end();
+  benchControls.stop();
+  for (const controller of controllers) controller.userData.trigger = false;
+  // Keep the previous bead and progress while its workpiece is hidden.
   active.vrTorch.removeFromParent();
   active.desktopTorch.visible = false;
   drawer.reading = false;
   active.guide.setVisible(false);
   active.poseGuide?.setVisible(false);
 
+  updateGunTrigger(active.desktopTorch, 0, false, 0);
   active = station;
+  vrControls.applied = !!active.applied;
+  vrControls.draw(false);
+  active.session.lastT = null;
+  active.session.speed = 0;
   active.guide.setVisible(true);
   active.poseGuide?.setVisible(true);
   holdRod(rodHeld);
   board.setVisible(true);
-  board.configure(active.id, active.session);
+  board.configure(active.id === 'plate' ? 'plate' : 'pipe', active.session);
   board.reset();
   result.style.display = 'none';
   wasFinished = active.session.finished;
   if (wasFinished) showResult();
   if (overlayTask) overlayTask.textContent = `${active.title} — ${active.hint}`;
+  focusStation();
+}
+
+function focusStation() {
+  const startT = active.session.plan?.current?.tAt(0) ?? 0;
+  const start = active.seam.pointAt(startT, new THREE.Vector3());
+  if (helmet) {
+    helmet.restoreCamera();
+    helmet.workpiece = active.group;
+    helmet.eyeOffset.copy(start).add(active.viewOffset ?? new THREE.Vector3(0, 0.25, 0.3));
+  }
+  if (renderer.xr.isPresenting) return;
+  active.group.updateWorldMatrix(true, true);
+  const target = active.group.localToWorld(start.clone());
+  controls.target.copy(target);
+  if (active.viewOffset) camera.position.copy(active.group.localToWorld(start.addScaledVector(active.viewOffset, 1.8)));
+  else camera.position.copy(target).add(new THREE.Vector3(0.12, 0.4, 0.7));
+  controls.update();
+  if (helmet?.enabled) helmet.enterCamera();
 }
 
 function resetActive() {
   if (demo) toggleDemo();
+  welding = false;
   active.reset();
+  active.updateDesktop();
   if (active.usesBoard) board.reset();
   result.style.display = 'none';
   wasFinished = false;
@@ -762,14 +779,29 @@ function resetActive() {
 // ---------------------------------------------------------------------------
 const keys = {};
 window.addEventListener('keydown', (e) => {
+  if (!renderer.xr.isPresenting) return;
+  if (e.target?.matches?.('input, textarea, select, [contenteditable="true"]')) return;
   keys[e.code] = true;
   if (e.code === 'KeyR') resetActive();
   if (e.code === 'KeyG' && !e.repeat) toggleDemo();
   if (e.code === 'Digit1') selectStation(plateStation);
   if (e.code === 'Digit2') selectStation(pipeStation);
-  if (e.code === 'Space') e.preventDefault();
+  if (e.code === 'Digit3') selectStation(appliedStations[0]);
+  if (e.code === 'Digit4') selectStation(appliedStations[1]);
+  if (!e.repeat && ['KeyN', 'KeyP'].includes(e.code)) benchControls.onStep(e.code === 'KeyN' ? 1 : -1);
+  if (e.code === 'KeyH' && active.applied && !isArcOn()) positioner.home();
+  if (e.code === 'KeyF' && !e.repeat && !renderer.xr.isPresenting) focusStation();
+  if (['Space', 'PageUp', 'PageDown', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
 });
 window.addEventListener('keyup', (e) => (keys[e.code] = false));
+window.addEventListener('blur', () => {
+  for (const code of Object.keys(keys)) keys[code] = false;
+  holdRod(false);
+  benchControls.stop();
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) for (const code of Object.keys(keys)) keys[code] = false;
+});
 
 const pointerNdc = new THREE.Vector2();
 let pointerInside = false;
@@ -778,26 +810,29 @@ renderer.domElement.addEventListener('pointermove', (e) => {
   pointerInside = true;
 });
 renderer.domElement.addEventListener('pointerleave', () => (pointerInside = false));
-// A click that lands on the other piece switches to it; OrbitControls keeps
-// everything else, so dragging to orbit never changes task by accident.
-let dragged = false;
-renderer.domElement.addEventListener('pointerdown', () => (dragged = false));
-renderer.domElement.addEventListener('pointermove', () => (dragged = true), { passive: true });
-renderer.domElement.addEventListener('pointerup', () => {
-  if (dragged) return;
-  if (drawerHover) drawer.activate(drawerHover);
-  else if (picker.hovered) selectStation(picker.hovered);
-});
 
 const vrControls = new VRControls(scene, renderer, shop, {
   weldingHand: WELDING_HAND,
+  basicBench: true,
+  applied: !!active.applied,
   onDemo: toggleDemo,
 });
-board.configure(active.id, active.session);
+board.configure(active.id === 'plate' ? 'plate' : 'pipe', active.session);
 const trainingUI = new TrainingUI({
   scene, renderer, camera, board, controllers, physicalInput, weldingHand: WELDING_HAND,
   helmet, vrControls, getDemo: () => demo, toggleDemo,
   supportsDemo: () => active.supportsDemo, reset: resetActive,
+  getHeldTool: () => rodHeld && !demo ? active.vrTorch : null,
+  getInteraction: () => ({ previous: '이전 과제', next: '다음 과제', lower: '테이블 낮추기', raise: '테이블 높이기' })[benchControls.hovered],
+  getMode: () => active.applied ? 'applied' : 'basic',
+  selectMode: mode => selectStation(mode === 'applied' ? appliedStations[0] : plateStation),
+  getJointLabel: () => `${stations.indexOf(active) + 1}/${stations.length} · ${active.title}`,
+  nextJoint: () => benchControls.onStep(1),
+  positioner: { get readout() {
+    const degrees = Math.round(THREE.MathUtils.radToDeg(positioner.pose.yaw - positioner.homeYaw));
+    return `수평 회전 ${degrees}° · 상판 ${Math.round((shop.position.y + bench.position.y) * 100)} cm`;
+  } },
+  resetPositioner: () => { if (!isArcOn()) positioner.home(); },
   selectStation: id => selectStation(stations.find(s => s.id === id)),
   getTechnique: () => active.session.plan?.technique,
   setTechnique: value => {
@@ -812,28 +847,58 @@ const overlayTask = document.getElementById('task');
 const readout = document.getElementById('readout');
 const result = document.getElementById('result');
 if (overlayTask) overlayTask.textContent = `${active.title} — ${active.hint}`;
+for (const button of document.querySelectorAll('[data-exercise]')) {
+  button.addEventListener('click', () => selectStation(button.dataset.exercise === 'applied' ? appliedStations[0] : plateStation));
+}
+
+webDemo = new WebWeldingDemo(shop, [plateStation, pipeStation], camera, controls);
+function setWebPresentation(web) {
+  document.body.classList.toggle('web-showcase', web);
+  controls.enabled = web;
+  webDemo.root.visible = web;
+  benchControls.group.visible = drawer.group.visible = !web;
+  board.setVisible(!web); hud.setVisible(false);
+  if (helmet) { helmet.keyboardEnabled = !web; helmet.filter.visible = !web && helmet.enabled; }
+  if (web) {
+    appliedRig.visible = false;
+    for (const station of stations) {
+      station.group.visible = station.desktopTorch.visible = station.vrTorch.visible = false;
+    }
+    result.style.display = 'none';
+    webDemo.frameCamera();
+  } else webDemo.pause();
+}
 
 renderer.xr.addEventListener('sessionstart', () => {
+  camera.clearViewOffset();
+  for (const code of Object.keys(keys)) keys[code] = false;
   if (demo) toggleDemo();
+  benchControls.stop();
   controls.enabled = false;
   overlay.style.display = 'none';
   syncTorchVisibility();
+  setWebPresentation(false);
 });
 renderer.xr.addEventListener('sessionend', () => {
   if (demo) toggleDemo();
+  benchControls.stop();
+  positioner.end();
   holdRod(false);
-  controls.enabled = true;
+  controls.enabled = false;
   overlay.style.display = 'block';
   syncTorchVisibility();
+  setWebPresentation(true);
 });
 
 function isArcOn() {
-  if (demo || trainingUI.blocksArc(torchController)) return false;
-  if (!renderer.xr.isPresenting) return !!keys['Space'];
-  // Both buttons: the lower one is holding the holder, the upper one strikes.
+  if (demo || positioner.held || positioner.moving) return false;
+  if (!renderer.xr.isPresenting) return false;
+  if (trainingUI.blocksArc(torchController)) return false;
+  // Grip holds the gun; the controller's index trigger is the gun trigger.
   return torchController.visible
     && torchController.userData.handedness === WELDING_HAND
     && rodHeld
+    && torchController.userData.physicalGripDown
     && torchController.userData.trigger;
 }
 
@@ -876,15 +941,22 @@ function tipLocal(target) {
     active.vrTorch.userData.tip.getWorldPosition(target);
     return active.group.worldToLocal(target);
   }
-  return active.tipLocal(target);
+  active.desktopTorch.updateWorldMatrix(true, true);
+  active.desktopTorch.userData.tip.getWorldPosition(target);
+  return active.group.worldToLocal(target);
 }
 
 function forwardLocal(target) {
   if (renderer.xr.isPresenting && rodHeld) {
     active.vrTorch.userData.tip.getWorldQuaternion(_q);
-    return target.set(0, 0, -1).applyQuaternion(_q);
+    target.set(0, 0, -1).applyQuaternion(_q);
+    active.group.getWorldQuaternion(_q).invert();
+    return target.applyQuaternion(_q).normalize();
   }
-  return active.forwardLocal(target);
+  active.desktopTorch.userData.tip.getWorldQuaternion(_q);
+  target.set(0, 0, -1).applyQuaternion(_q);
+  active.group.getWorldQuaternion(_q).invert();
+  return target.applyQuaternion(_q).normalize();
 }
 
 function readViewerPosition(xrFrame) {
@@ -908,22 +980,31 @@ function showResult() {
   result.style.display = 'block';
 }
 
-// Only the active station runs physics; the other keeps its finished bead on
-// screen and costs nothing but its draw calls.
+// Only the selected workpiece is rendered and sampled.
 function animate(time, xrFrame) {
   const dt = Math.min(clock.getDelta(), 0.05);
   if (renderer.xr.isPresenting) renderer.xr.updateCamera(camera);
   physicalInput.update(xrFrame, dt);
+  if (!renderer.xr.isPresenting) {
+    webDemo.update(dt);
+    renderer.render(scene, camera);
+    window.weldReady = true;
+    return;
+  }
 
   if (renderer.xr.isPresenting) readViewerPosition(xrFrame);
   else { _viewer.copy(camera.position); _viewerQ.copy(camera.quaternion); }
 
   trainingUI.update(xrFrame);
+  if (active.applied) positioner.update(dt, keys, {
+    blocked: demo || trainingUI.blocksManipulation || welding ||
+      (renderer.xr.isPresenting ? !!torchController.userData.trigger : false),
+    xr: renderer.xr.isPresenting, controller: gripController,
+  });
   for (const station of stations) {
     if (station !== active) station.bead.update(dt, { arcOn: false, point: _contact, t: 0, passive: true });
   }
   vrControls.update(_viewer, demo);
-  gripMarker.visible = gripController.visible;
   if (demo) {
     active.demoPlayer.update(dt);
     board.demoStage = active.session.plan?.sequential
@@ -944,7 +1025,6 @@ function animate(time, xrFrame) {
   if (renderer.xr.isPresenting && rodHeld)
     active.vrTorch.visible = !!torchController.userData.source && !torchController.userData.source.hand
       && torchController.userData.handedness === WELDING_HAND;
-  updateBenchDrag(dt);
 
   // The drawer sits between the welder and the work, so it gets first refusal
   // on the ray; otherwise reaching for it would keep selecting the piece
@@ -953,16 +1033,23 @@ function animate(time, xrFrame) {
   const aim = board.settingsOpen || board.hit(candidateAim) ? null : candidateAim;
   const drawerHit = aim ? aim.intersectObjects(drawer.picks, true)[0]?.object ?? null : null;
   drawerHover = drawer.classify(drawerHit);
-  picker.update(dt, aim, active.id, !!drawerHover);
+  benchControls.update(dt, {
+    keys, xr: renderer.xr.isPresenting, controller: gripController,
+    blocked: welding || positioner.held || trainingUI.blocksManipulation ||
+      (renderer.xr.isPresenting ? rodHeld : false),
+    switchBlocked: welding || trainingUI.blocksManipulation,
+    title: `${stations.indexOf(active) + 1}/${stations.length} ${active.title}`, ray: drawerHover ? null : aim,
+  });
+  picker.update(dt, aim, active.id, !!drawerHover || !!benchControls.hovered);
   drawer.update(dt, _viewer, _viewerQ);
 
-  if (!renderer.xr.isPresenting) active.updateDesktop(dt, keys);
   tipLocal(_tip);
   forwardLocal(_fwd);
   // The displayed controller pose is already filtered; score that same pose.
 
   const arcOn = isArcOn() && !active.session.finished;
   const m = active.session.sample(dt, _tip, _fwd, arcOn);
+  welding = m.welding;
   active.afterSample?.(m);
 
   active.updateGuide(dt, m);
@@ -998,19 +1085,23 @@ function animate(time, xrFrame) {
   window.weldReady = true;
 }
 
-// Only the selected exercise starts with guides. Both workpieces stay visible.
+// Hidden exercises retain their progress for the next selection.
 for (const station of stations) {
+  station.updateDesktop();
   station.guide.setVisible(station === active && trainingUI.guides);
   station.poseGuide?.setVisible(station === active && trainingUI.guides);
 }
 board.setVisible(true);
 syncTorchVisibility();
+setWebPresentation(true);
 
+await renderer.compileAsync(scene, camera);
+document.body.appendChild(VRButton.createButton(renderer));
 renderer.setAnimationLoop(animate);
 
 if (new URLSearchParams(location.search).has('debug')) {
   window.weldDebug = {
-    scene, camera, controls, renderer, shop, stations, picker, hud, board, trainingUI, physicalInput,
+    scene, camera, controls, renderer, shop, stations, picker, benchControls, hud, board, trainingUI, physicalInput,
     get active() { return active; },
     selectStation,
     resetActive,

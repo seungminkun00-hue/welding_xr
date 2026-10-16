@@ -1,0 +1,22 @@
+welding-gun.stl
+User-provided file, copied unchanged from Downloads (Korean filename).
+SHA-256: 423c4283be8f5c58aa774b8fd6cbf0aaa3bf97b521d4f1fb5ef6dc1d65ba527b
+7386 triangles. Source coordinates interpreted as millimetres.
+
+Runtime appearance in src/WeldingGun.js:
+Five material regions: red painted shell (3014 triangles), molded black
+rubber grip (1015), brushed steel neck (2010), copper nozzle (1282), and
+the front trigger surface (65). All original triangle positions are preserved
+at rest. Procedural microtextures are generated locally; no external skins.
+Source-to-grip coordinates (metres):
+  X = (source Z - 15) / 1000
+  Y = (55 - source Y) / 1000
+  Z = (source X - 10) / 1000
+The controller profile's neutral trigger surface and squeeze button determine
+pickup translation and pitch. The trigger pivots inward by up to 6 degrees
+according to analog trigger pressure (about 3.1 mm at the contact centre).
+A 6 mm contact wire extends the original muzzle for seam measurement.
+
+welding-gun-inspection.png and welding-gun-trigger-inspection.png
+Static mesh projections generated for checking the supplied CAD geometry.
+These are not screenshots of the WebXR application.

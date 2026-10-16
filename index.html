@@ -3,59 +3,48 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>용접 XR 기초모드 — 직선 · 파이프</title>
+  <title>용접 XR — 직선과 원형 용접 데모</title>
   <link rel="stylesheet" href="./style.css" />
-  <!-- three.js is vendored into ./vendor rather than pulled from a CDN: the
-       demo has to run on a workshop PC or a headset with no internet, and a
-       blocked CDN kills the whole module graph with no visible error. -->
   <script type="importmap">
-    {
-      "imports": {
-        "three": "./vendor/three.module.js",
-        "three/addons/": "./vendor/addons/"
-      }
-    }
+    { "imports": { "three": "./vendor/three.module.js", "three/addons/": "./vendor/addons/" } }
   </script>
 </head>
 <body>
-  <div id="overlay">
-    <h1>기초모드 — 직선 용접 · 파이프 용접</h1>
-    <p>왼쪽은 <b>직선 용접(평판 맞대기)</b>, 오른쪽은 <b>파이프 용접</b>입니다.
-      전광판 상단의 <b>직선 용접 / 파이프 용접</b> 버튼으로 VR에서 바로 전환할 수 있습니다.</p>
-    <p id="task" class="hint"></p>
-    <p>
-      <b>작업대 밑 서랍</b>에 조작 안내가 적힌 종이가 들어 있습니다.
-      서랍을 열고 종이를 집어 드세요.
-    </p>
-    <p class="hint">
-      VR = 왼손 컨트롤러의 포인터로 가리키고 트리거 · 데스크톱 = 클릭.
-      급하면 <b>Space</b>로 아크, <b>W</b>로 진행, <b>1</b>/<b>2</b>로 과제 전환.
-    </p>
-    <p class="hint"><b>기초연습</b> · 전광판은 항상 표시됩니다.
-      Meta 컨트롤러 두 개를 사용합니다. 오른손 그립으로 운봉을 잡고 트리거로 용접하세요.
-      긴 포인터로 오른쪽 아래 설정을 가리키고 트리거로 선택하세요.
-      <a href="./application.html">응용연습 · 현장 포지셔너 작업장</a></p>
-    <p class="hint">파이프는 하진 궤적·오버랩 후 편도 4회로 마무리합니다.
-      기본 겨냥은 철판 기준 90°·철판 쪽 2 mm이며 설정에서 조절할 수 있습니다.
-      중력·결함 지표는 교육용 근사입니다.</p>
-    <div id="readout">준비됨</div>
-  </div>
+  <main id="overlay" class="demo-panel">
+    <span class="demo-eyebrow">WELDING XR · INTERACTIVE DEMO</span>
+    <h1>용접, 이렇게 만들어집니다.</h1>
+    <p class="demo-intro">용접 과정을 보고, 직접 따라 해보세요.</p>
+    <div class="demo-tabs demo-modes" role="group" aria-label="웹 체험 방식">
+      <button type="button" data-web-mode="demo" aria-pressed="true">시연 보기</button>
+      <button type="button" data-web-mode="practice" aria-pressed="false">직접 해보기</button>
+    </div>
+    <div class="demo-tabs" role="group" aria-label="용접 모양 선택">
+      <button type="button" data-demo="plate" aria-pressed="true"><span aria-hidden="true">━</span> 직선 용접</button>
+      <button type="button" data-demo="pipe" aria-pressed="false"><span aria-hidden="true">◯</span> 원형 용접</button>
+    </div>
+    <p id="task" class="hint">작업장을 준비하고 있습니다…</p>
+    <div class="demo-actions">
+      <button type="button" id="demo-play">▶ 시연 시작</button>
+      <button type="button" id="demo-replay">처음부터</button>
+    </div>
+    <progress id="demo-progress" max="1" value="0" aria-label="용접 시연 진행률"></progress>
+    <p id="readout" role="status">잠시만 기다려 주세요.</p>
+    <p id="demo-note" class="demo-note">시연 보기 · 원형은 VR과 같은 운봉 순서로 진행합니다.</p>
+    <div class="demo-view-controls">
+      <button type="button" id="demo-view-reset" title="F키로도 시점을 복귀할 수 있습니다">시점 복귀 <kbd>F</kbd></button>
+      <p id="demo-view-help">마우스 드래그로 회전 · 휠로 확대<br>방향키 / WASD 이동 · Q/E 높이 조절</p>
+    </div>
+  </main>
   <div id="result"></div>
   <div id="booterror"></div>
   <script type="module" src="./shop.js"></script>
   <script>
-    // A module that fails to load leaves the overlay sitting on a blank page,
-    // which looks identical to an app that is running but drawing nothing.
     setTimeout(function () {
       if (document.querySelector('canvas')) return;
       var el = document.getElementById('booterror');
-      el.innerHTML =
-        '<b>3D 엔진을 불러오지 못했습니다.</b><br>' +
-        'DevTools 콘솔(F12)의 빨간 오류를 확인하세요. 흔한 원인: ' +
-        '<code>vendor/three.module.js</code> 누락, 또는 <code>file://</code>로 연 경우 ' +
-        '(정적 서버로 열어야 합니다).';
+      el.textContent = '3D 작업장을 불러오지 못했습니다. 페이지를 새로고침해 주세요.';
       el.style.display = 'block';
-    }, 3000);
+    }, 5000);
   </script>
 </body>
 </html>

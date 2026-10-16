@@ -120,6 +120,7 @@ export class StationPicker {
 
   pick(raycaster) {
     for (const station of this.stations) {
+      if (!station.group.visible) continue;
       if (raycaster.intersectObjects(station.picks, true).length) return station;
     }
     return null;

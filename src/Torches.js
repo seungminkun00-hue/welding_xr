@@ -18,6 +18,7 @@ const _unitNegZ = new THREE.Vector3(0, 0, -1);
 const _tipInv = new THREE.Matrix4();
 const _poseMat = new THREE.Matrix4();
 const _poseQ = new THREE.Quaternion();
+const _origin = new THREE.Vector3();
 const _one = new THREE.Vector3(1, 1, 1);
 
 /** Straight MIG gun for the flat butt joint. Length is the tip's own offset. */
@@ -30,6 +31,7 @@ export function buildMigTorch(length = 0.15) {
   );
   body.rotation.x = -Math.PI / 2;
   body.position.z = -length * 0.36;
+  body.userData.controllerNeck = true;
   group.add(body);
 
   const nozzle = new THREE.Mesh(
@@ -72,15 +74,18 @@ export function buildStickHolder() {
   const cable = new THREE.Mesh(new THREE.CylinderGeometry(0.0115, 0.0115, 0.1, 12), black);
   cable.rotation.x = -Math.PI / 2;
   cable.position.z = 0.072;
+  cable.userData.controllerHandle = true;
   group.add(cable);
 
   const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.0205, 0.0225, 0.105, 20), black);
   handle.rotation.x = -Math.PI / 2;
   handle.position.z = -0.012;
+  handle.userData.controllerHandle = true;
   group.add(handle);
 
   const trigger = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.016, 0.03), black);
   trigger.position.set(0, -0.021, -0.034);
+  trigger.userData.controllerHandle = true;
   group.add(trigger);
 
   // The swan neck. Quadratic bend so the end tangent is a clean 48 degrees.
@@ -120,10 +125,26 @@ export function buildStickHolder() {
   return group;
 }
 
+export function setTorchControllerMounted(tool, mounted = true) {
+  // Expose the real controller's buttons without changing the measured tip.
+  tool.traverse(mesh => {
+    if (mesh.userData.controllerHandle) mesh.visible = !mounted;
+    if (mesh.userData.controllerNeck) {
+      mesh.userData.restZ ??= mesh.position.z;
+      mesh.scale.y = mounted ? 0.5 : 1;
+      mesh.position.z = mesh.userData.restZ * (mounted ? 1.5 : 1);
+    }
+  });
+  return tool;
+}
+
 /** Place a torch so its electrode tip lands at `tipPos` aimed along `fwd`. */
-export function poseTorchByTip(mesh, tipPos, fwd) {
+export function poseTorchByTip(mesh, tipPos, fwd, up = null) {
   _tipInv.copy(mesh.userData.tip.matrix).invert();
-  _poseQ.setFromUnitVectors(_unitNegZ, fwd);
+  if (up) {
+    _poseMat.lookAt(_origin, fwd, up);
+    _poseQ.setFromRotationMatrix(_poseMat);
+  } else _poseQ.setFromUnitVectors(_unitNegZ, fwd);
   _poseMat.compose(tipPos, _poseQ, _one).multiply(_tipInv);
   _poseMat.decompose(mesh.position, mesh.quaternion, mesh.scale);
 }

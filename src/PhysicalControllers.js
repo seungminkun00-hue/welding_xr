@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { ControllerVisuals } from './ControllerVisuals.js';
 
 // Physical controllers only. Held tools use gripSpace; menus use the independent
 // targetRaySpace. Read both once per animation frame, never in input callbacks.
@@ -16,6 +17,7 @@ export class PhysicalControllers {
       ray.name = hand + '-target-ray'; ray.visible = false;
       anchor.userData.ray = ray;
       scene.add(anchor, ray);
+      anchor.userData.visuals = new ControllerVisuals(anchor);
       return anchor;
     });
     [this.right, this.left] = this.controllers;
