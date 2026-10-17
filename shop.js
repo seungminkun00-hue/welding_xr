@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { WebWeldingDemo } from './src/WebWeldingDemo.js';
+import { DesktopPanel } from './src/DesktopPanel.js';
 
 import { perforatedBench, plateFixtures } from './src/Workshop.js';
 import { buildFieldWorkshop } from './src/FieldWorkshop.js';
@@ -570,8 +571,10 @@ const helmet = visualFeatures
 
 const picker = new StationPicker(shop, stations);
 const benchControls = new BasicBenchControls(shop, bench, {
-  onStep: direction => selectStation(stations[
-    (stations.indexOf(active) + direction + stations.length) % stations.length]),
+  onStep: direction => {
+    if (webDemo && !renderer.xr.isPresenting) webDemo.step(direction);
+    else selectStation(stations[(stations.indexOf(active) + direction + stations.length) % stations.length]);
+  },
 });
 
 // The control sheet lives in here rather than in the page overlay.
@@ -713,6 +716,10 @@ assignHands();
 // Switching
 // ---------------------------------------------------------------------------
 function selectStation(station) {
+  if (webDemo && !renderer.xr.isPresenting) {
+    if (station) webDemo.select(station.id);
+    return;
+  }
   if (!station || station === active || welding) return;
   // A replay belongs to the piece it was recorded on; carrying the flag across
   // would leave the other station with no torch and no way to get one back.
@@ -851,22 +858,105 @@ for (const button of document.querySelectorAll('[data-exercise]')) {
   button.addEventListener('click', () => selectStation(button.dataset.exercise === 'applied' ? appliedStations[0] : plateStation));
 }
 
-webDemo = new WebWeldingDemo(shop, [plateStation, pipeStation], camera, controls);
+const initialDesktopId = active.id;
+webDemo = new WebWeldingDemo(shop, stations, camera, controls, {
+  onSelect: example => {
+    active = example.source;
+    benchControls.stop();
+    board.configure(active.id === 'plate' ? 'plate' : 'pipe', active.session);
+    board.reset();
+    board.blockers = example.surfaces;
+    appliedRig.visible = !!active.applied;
+    for (const station of stations) station.group.visible = false;
+  },
+});
+webDemo.select(initialDesktopId);
+const desktopPanel = new DesktopPanel(webDemo, benchControls, board, {
+  rotate: direction => { positioner.pose.yaw += direction * Math.PI / 36; positioner.apply(); },
+  home: () => positioner.home(),
+});
+const vrBoardSettings = board.getSettings;
+const vrBoardAction = board.onAction;
+board.getSettings = () => {
+  const settings = vrBoardSettings();
+  if (renderer.xr.isPresenting) return settings;
+  return { ...settings, ...webDemo.settings, demo: false,
+    web: {
+      title: active.title, mode: webDemo.mode, playing: webDemo.playing,
+      stage: webDemo.active.strokes[webDemo.strokeIndex].label,
+      progress: Math.round(webDemo.progress * 100), arc: webDemo.arcOn,
+      speed: Number((webDemo.speed * 1000).toFixed(1)), seconds: Math.floor(webDemo.arcTime),
+    },
+    inputStatus: 'PC · N/P 과제 전환 · Page Up/Down 높이',
+  };
+};
+board.onAction = action => {
+  if (renderer.xr.isPresenting) return vrBoardAction(action);
+  webDemo.releasePointer();
+  if (action === 'guide') webDemo.setSetting('guides', !webDemo.settings.guides);
+  if (action === 'ghost' || action === 'start' || action === 'hud') webDemo.setSetting(action, !webDemo.settings[action]);
+  if (action === 'reset') webDemo.reset();
+  if (action === 'plate' || action === 'pipe') webDemo.select(action);
+  if (action === 'basic') webDemo.select('plate');
+  if (action === 'applied') webDemo.select(appliedStations[0].id);
+  if (action === 'next-joint') webDemo.step(1);
+  if (action === 'positioner-home') positioner.home();
+  if (action === 'demo') {
+    webDemo.setMode('demo');
+    if (webDemo.progress >= 1) webDemo.reset();
+    webDemo.playing = !webDemo.playing;
+  }
+};
+// Bench buttons consume clicks before orbiting or striking an arc.
+const benchRay = new THREE.Raycaster();
+const benchPointer = new THREE.Vector2();
+let benchDown = null;
+const pickBench = event => {
+  const rect = renderer.domElement.getBoundingClientRect();
+  benchPointer.set((event.clientX - rect.left) / rect.width * 2 - 1, 1 - (event.clientY - rect.top) / rect.height * 2);
+  camera.updateWorldMatrix(true, false);
+  benchControls.group.updateWorldMatrix(true, true);
+  benchRay.setFromCamera(benchPointer, camera);
+  return benchControls.pick(benchRay);
+};
+// WebWeldingDemo delegates before starting its own practice gesture.
+webDemo.pickUI = event => {
+  const action = pickBench(event);
+  if (action) benchDown = { action, x: event.clientX, y: event.clientY };
+  return action;
+};
+window.addEventListener('pointerup', event => {
+  const down = benchDown; benchDown = null;
+  if (renderer.xr.isPresenting || event.button !== 0 || !down || event.target !== renderer.domElement) return;
+  if (Math.hypot(event.clientX - down.x, event.clientY - down.y) < 8 && pickBench(event) === down.action)
+    benchControls.activate(down.action);
+}, true);
+window.addEventListener('blur', () => { benchDown = null; });
+renderer.domElement.addEventListener('pointercancel', () => { benchDown = null; });
 function setWebPresentation(web) {
   document.body.classList.toggle('web-showcase', web);
   controls.enabled = web;
   webDemo.root.visible = web;
-  benchControls.group.visible = drawer.group.visible = !web;
-  board.setVisible(!web); hud.setVisible(false);
+  benchControls.group.visible = true;
+  drawer.group.visible = !web;
+  board.setVisible(!web || webDemo.settings.board); hud.setVisible(false);
   if (helmet) { helmet.keyboardEnabled = !web; helmet.filter.visible = !web && helmet.enabled; }
   if (web) {
-    appliedRig.visible = false;
+    appliedRig.visible = !!webDemo.active.source.applied;
     for (const station of stations) {
       station.group.visible = station.desktopTorch.visible = station.vrTorch.visible = false;
     }
     result.style.display = 'none';
-    webDemo.frameCamera();
-  } else webDemo.pause();
+    webDemo.select(active.id);
+  } else {
+    webDemo.pause();
+    if (desktopPanel.dialog.open) desktopPanel.dialog.close();
+    vrControls.applied = !!active.applied;
+    vrControls.draw(false);
+    board.blockers = stations.flatMap(station => station.picks);
+    board.configure(active.id === 'plate' ? 'plate' : 'pipe', active.session);
+    board.reset();
+  }
 }
 
 renderer.xr.addEventListener('sessionstart', () => {
@@ -986,7 +1076,13 @@ function animate(time, xrFrame) {
   if (renderer.xr.isPresenting) renderer.xr.updateCamera(camera);
   physicalInput.update(xrFrame, dt);
   if (!renderer.xr.isPresenting) {
+    benchControls.update(dt, {
+      keys: Object.fromEntries([...webDemo.keys].map(key => [key, true])), xr: false,
+      blocked: webDemo.pressed, title: active.title,
+    });
     webDemo.update(dt);
+    desktopPanel.update();
+    board.update(dt);
     renderer.render(scene, camera);
     window.weldReady = true;
     return;
@@ -1101,7 +1197,7 @@ renderer.setAnimationLoop(animate);
 
 if (new URLSearchParams(location.search).has('debug')) {
   window.weldDebug = {
-    scene, camera, controls, renderer, shop, stations, picker, benchControls, hud, board, trainingUI, physicalInput,
+    scene, camera, controls, renderer, shop, stations, picker, benchControls, hud, board, trainingUI, physicalInput, webDemo, desktopPanel,
     get active() { return active; },
     selectStation,
     resetActive,

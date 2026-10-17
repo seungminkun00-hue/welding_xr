@@ -161,7 +161,9 @@ export class StatsBoard {
       this._button('plate', '직선 용접', 536, 20, 220, 52, true, this.exercise === 'plate');
       this._button('pipe', '파이프 용접', 768, 20, 228, 52, true, this.exercise === 'pipe');
     } else this._text(applied ? settings.jointLabel ?? '작은 배관 접합' : this.exercise === 'pipe' ? '파이프 원주 필릿' : '직선 용접 · 평판', 540, 55, applied ? 20 : 27);
-    if (this.settingsOpen) this._settings(settings);
+    if (this.settingsOpen && settings.web) this._webSettings(settings);
+    else if (this.settingsOpen) this._settings(settings);
+    else if (settings.web) this._web(settings.web);
     else if (settings.demo) {
       this._text('명장 시연 · 고스트만 재생 중', 58, 168, 36, GREEN);
       this._text('실제 운봉과 연습 기록은 멈춰 있습니다.', 58, 235, 28);
@@ -170,7 +172,7 @@ export class StatsBoard {
     } else if (this.result) this._result();
     else this._live();
     this._text(settings.inputStatus ?? '', 28, 651, 19, DIM);
-    this._text('왼쪽 트리거: 잡고 이동 / 버튼은 짧게 클릭', 28, 680, 20, DIM);
+    this._text(settings.web ? '마우스: 운봉 · 좌클릭: 용접 · 우클릭: 시점' : '왼쪽 트리거: 잡고 이동 / 버튼은 짧게 클릭', 28, 680, 20, DIM);
     this._button('settings', this.settingsOpen ? '닫기' : '설정', 868, 628, 128, 56, true, this.settingsOpen);
     // A drawn gear avoids relying on a particular font having a gear glyph.
     if (!this.settingsOpen) {
@@ -229,6 +231,28 @@ export class StatsBoard {
         : s.unified ? '테이블 ◀ / ▶: 과제 · 왼쪽 스틱 위·아래: 높이'
           : '작업물은 왼손 그립을 확실히 누른 동안만 움직입니다.', 42, 591, 22, DIM);
     }
+  }
+  _webSettings(s) {
+    this._text('PC 표시 · 연습 설정', 42, 120, 30, GREEN);
+    this._button('guide', `궤도 (가이드)  ${s.guides ? 'ON' : 'OFF'}`, 42, 155, 450, 64, true, s.guides);
+    this._button('ghost', `고스트 토치  ${s.ghost ? 'ON' : 'OFF'}`, 520, 155, 460, 64, true, s.ghost);
+    this._button('start', `이어갈 지점  ${s.start ? 'ON' : 'OFF'}`, 42, 240, 450, 64, true, s.start);
+    this._button('demo', s.web.playing ? '시연 일시정지' : '시연 보기', 520, 240, 460, 64);
+    this._button('reset', '현재 과제 다시 시작', 42, 325, 450, 64);
+    this._button('next-joint', '다음 과제 ▶', 520, 325, 460, 64);
+    this._button('hud', `토치 HUD  ${s.hud ? 'ON' : 'OFF'}`, 42, 410, 450, 64, true, s.hud);
+    this._text('표시를 꺼도 넉넉한 경로 보정은 유지됩니다.', 42, 530, 24, DIM);
+  }
+  _web(s) {
+    this._text(s.mode === 'demo' ? '시연 보기' : '직접 해보기', 42, 145, 36, GREEN);
+    this._text(s.stage, 42, 202, 24);
+    this._text(`진행 ${s.progress}%`, 42, 290, 48, INK);
+    this.ctx.fillStyle = '#273545'; this.ctx.fillRect(42, 325, 938, 26);
+    this.ctx.fillStyle = GREEN; this.ctx.fillRect(42, 325, 938 * s.progress / 100, 26);
+    this._text(s.progress >= 100 ? '완료' : s.arc ? '● 용접 중' : '아크 OFF', 42, 420, 32, s.arc ? GREEN : DIM);
+    this._text(`아크 시간 ${s.seconds}초`, 520, 420, 30);
+    this._text(s.mode === 'practice' ? `운봉 속도 ${s.speed.toFixed(1)} mm/s` : s.playing ? '시연 재생 중' : '시연 대기', 42, 490, 28);
+    this._text('경로 보정 체험 · 실제 자세 채점은 VR 연습에서 진행', 42, 572, 23, DIM);
   }
   _live() {
     const m = this.live, pipe = this.exercise === 'pipe';
